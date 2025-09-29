@@ -1,0 +1,62 @@
+{
+  "title": "Detailed Forecast - London, GB",
+  "headers": [
+    "Date",
+    "Day",
+    "High/Low",
+    "Conditions",
+    "Humidity",
+    "Wind",
+    "Precipitation"
+  ],
+  "rows": [
+    [
+      "09/17",
+      "Wed",
+      "55.7°F/74.5°F",
+      "Partly Cloudy",
+      "71%",
+      "8 mph",
+      "-"
+    ],
+    [
+      "09/18",
+      "Thu",
+      "62.6°F/88.7°F",
+      "Drizzle",
+      "41%",
+      "12 mph",
+      "34%"
+    ],
+    [
+      "09/19",
+      "Fri",
+      "61.3°F/78.5°F",
+      "Light Rain",
+      "45%",
+      "5 mph",
+      "73%"
+    ],
+    [
+      "09/20",
+      "Sat",
+      "52.2°F/69.4°F",
+      "Moderate Rain",
+      "76%",
+      "18 mph",
+      "32%"
+    ],
+    [
+      "09/21",
+      "Sun",
+      "50.6°F/61.3°F",
+      "Cloudy",
+      "83%",
+      "12 mph",
+      "21%"
+    ]
+  ],
+  "summary": "5-day forecast starting September 17, 2025",
+  "footer": "Report generated: 2025-09-17 16:09:07",
+  "generated_at": "2025-09-17T16:09:07.024085"
+}

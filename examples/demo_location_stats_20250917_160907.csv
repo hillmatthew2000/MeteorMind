@@ -1,0 +1,7 @@
+# Location Statistics Report
+"Location","Queries","Last Query","Avg Temp","Temp Samples"
+"New York, US","17","09/17 06:09","22.9°C","11"
+"Paris, FR","11","09/12 22:09","20.6°C","7"
+"Tokyo, JP","10","09/17 14:09","19.2°C","6"
+"Berlin, DE","8","09/17 11:09","17.6°C","2"
+"London, GB","4","08/31 23:09","25.4°C","3"

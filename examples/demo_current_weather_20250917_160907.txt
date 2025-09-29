@@ -1,0 +1,14 @@
+Current Weather Report
+======================
+
+Location     | Temperature | Feels Like | Conditions       | Humidity | Pressure | Wind Speed | Updated 
+--------------------------------------------------------------------------------------------------------
+London, GB   | 24.7°C      | 25.4°C     | Scattered Clouds | 63%      | 990 hPa  | 8.1 m/s    | 16:09   
+Paris, FR    | 24.2°C      | 22.3°C     | Light Rain       | 48%      | 995 hPa  | 4.7 m/s    | 16:09   
+Tokyo, JP    | 16.2°C      | 15.0°C     | Drizzle          | 68%      | 1022 hPa | 1.8 m/s    | 16:09   
+New York, US | 17.4°C      | 17.9°C     | Scattered Clouds | 62%      | 997 hPa  | 9.4 m/s    | 16:09   
+Sydney, AU   | 13.8°C      | 11.0°C     | Clear Sky        | 59%      | 1024 hPa | 1.3 m/s    | 16:09   
+
+Summary: 5 locations | Avg: 19.3°C | Range: 13.8°C - 24.7°C
+
+Report generated: 2025-09-17 16:09:07
