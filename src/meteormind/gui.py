@@ -488,7 +488,7 @@ class WeatherGUI:
             f"💨 Wind Speed: {self.formatter.format_wind_speed(weather_data.wind_speed)}\n"
         )
 
-        if weather_data.wind_direction > 0:
+        if weather_data.wind_direction is not None:
             weather_text += f"🧭 Wind Direction: {self.formatter.format_wind_direction(weather_data.wind_direction)}\n"
 
         weather_text += f"☁️  Conditions: {weather_data.description}\n"
@@ -594,7 +594,7 @@ class WeatherGUI:
             forecast_text += "\n"
 
         # Show units legend
-        temp_unit = "°F" if self.unit_preferences.temperature.value == "fahrenheit" else "°C"
+        temp_unit = self.formatter.temperature_symbol
         wind_unit = self.formatter.format_wind_speed(0, show_unit=True).split()[-1]
         forecast_text += f"💡 Temperature in {temp_unit}, Wind speed in {wind_unit}\n"
 

@@ -258,7 +258,7 @@ class WeatherCLI:
         print(f"🏋️  Pressure: {self.formatter.format_pressure(weather_data.pressure)}")
         print(f"💨 Wind: {self.formatter.format_wind_speed(weather_data.wind_speed)}")
 
-        if weather_data.wind_direction > 0:
+        if weather_data.wind_direction is not None:
             print(
                 f"🧭 Wind Direction: {self.formatter.format_wind_direction(weather_data.wind_direction)}"
             )
@@ -360,7 +360,7 @@ class WeatherCLI:
         print("=" * 80)
 
         # Show units legend
-        temp_unit = "°F" if self.unit_preferences.temperature.value == "fahrenheit" else "°C"
+        temp_unit = self.formatter.temperature_symbol
         wind_unit = self.formatter.format_wind_speed(0, show_unit=True).split()[-1]
         print(f"💡 Temperature in {temp_unit}, Wind speed in {wind_unit}")
 

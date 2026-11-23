@@ -1,42 +1,103 @@
-"""
-Core data structures for the Weather Application.
+"""Core data models: locations, weather observations, forecasts and favorites.
 
-This module defines the fundamental data structures used throughout the application:
-- WeatherData: Represents current weather information
-- Location: Represents a geographic location with coordinates
-- ForecastData: Represents forecast information
-- LinkedList: Dynamic storage for favorite locations
+All models serialise to plain JSON-compatible dictionaries with ``to_dict``
+and are rebuilt with ``from_dict``. Fields added after the first release are
+optional in ``from_dict`` so files written by older versions still load.
 
-Why Linked Lists over Arrays:
-Linked lists provide several advantages for managing favorite locations:
-1. Dynamic size - can grow/shrink without pre-allocated memory
-2. Efficient insertions/deletions at any position (O(1) if we have the node reference)
-3. No memory waste - only allocate what's needed
-4. Easy reordering of favorite locations
-5. No need to handle array resizing complexities
+Favorites are kept in a small singly linked list. The list is ordered by most
+recent use: opening a favorite moves its node to the head, which is a constant
+time relink once the node is found, and new favorites are pushed onto the head.
 """
 
+from __future__ import annotations
+
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
+
+
+def _parse_datetime(value: Any) -> datetime:
+    """Parse an ISO-8601 timestamp, falling back to "now" for missing values."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        return datetime.fromisoformat(value)
+    return datetime.now()
+
+
+@dataclass
+class Location:
+    """A named place with coordinates, as resolved by the geocoding API."""
+
+    city: str
+    country: str
+    latitude: float
+    longitude: float
+    added_date: datetime = field(default_factory=datetime.now)
+    state: str = ""
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """Case-insensitive identity used to detect duplicates."""
+        return self.city.casefold(), self.country.casefold()
+
+    def matches(self, city: str, country: str) -> bool:
+        return self.key == (city.casefold(), country.casefold())
+
+    @property
+    def display_name(self) -> str:
+        """``City, State, CC`` when a state/region is known, else ``City, CC``."""
+        parts = [self.city, self.state, self.country]
+        return ", ".join(part for part in parts if part)
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "city": self.city,
+            "country": self.country,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "added_date": self.added_date.isoformat(),
+        }
+        if self.state:
+            data["state"] = self.state
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Location:
+        return cls(
+            city=data["city"],
+            country=data["country"],
+            latitude=float(data["latitude"]),
+            longitude=float(data["longitude"]),
+            added_date=_parse_datetime(data.get("added_date")),
+            state=data.get("state", ""),
+        )
+
+    def __str__(self) -> str:
+        return f"{self.city}, {self.country}"
 
 
 @dataclass
 class WeatherData:
-    """Represents current weather data for a location."""
+    """Current conditions in canonical metric units (°C, m/s, hPa, metres)."""
 
     city: str
     country: str
-    temperature: float  # in Celsius by default
+    temperature: float
     feels_like: float
-    humidity: int  # percentage
-    pressure: int  # hPa
-    wind_speed: float  # m/s by default
-    wind_direction: int  # degrees
+    humidity: int
+    pressure: int
+    wind_speed: float
+    wind_direction: int
     description: str
     timestamp: datetime = field(default_factory=datetime.now)
+    icon: str = ""
+    visibility: int | None = None
+    temp_min: float | None = None
+    temp_max: float | None = None
 
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
+    def to_dict(self) -> dict[str, Any]:
         return {
             "city": self.city,
             "country": self.country,
@@ -48,69 +109,35 @@ class WeatherData:
             "wind_direction": self.wind_direction,
             "description": self.description,
             "timestamp": self.timestamp.isoformat(),
+            "icon": self.icon,
+            "visibility": self.visibility,
+            "temp_min": self.temp_min,
+            "temp_max": self.temp_max,
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "WeatherData":
-        """Create WeatherData from dictionary."""
-        timestamp = (
-            datetime.fromisoformat(data["timestamp"]) if "timestamp" in data else datetime.now()
-        )
+    def from_dict(cls, data: dict[str, Any]) -> WeatherData:
         return cls(
             city=data["city"],
             country=data["country"],
-            temperature=data["temperature"],
-            feels_like=data["feels_like"],
-            humidity=data["humidity"],
-            pressure=data["pressure"],
-            wind_speed=data["wind_speed"],
-            wind_direction=data["wind_direction"],
+            temperature=float(data["temperature"]),
+            feels_like=float(data["feels_like"]),
+            humidity=int(data["humidity"]),
+            pressure=int(data["pressure"]),
+            wind_speed=float(data["wind_speed"]),
+            wind_direction=int(data["wind_direction"]),
             description=data["description"],
-            timestamp=timestamp,
+            timestamp=_parse_datetime(data.get("timestamp")),
+            icon=data.get("icon", ""),
+            visibility=data.get("visibility"),
+            temp_min=data.get("temp_min"),
+            temp_max=data.get("temp_max"),
         )
-
-
-@dataclass
-class Location:
-    """Represents a geographic location."""
-
-    city: str
-    country: str
-    latitude: float
-    longitude: float
-    added_date: datetime = field(default_factory=datetime.now)
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "city": self.city,
-            "country": self.country,
-            "latitude": self.latitude,
-            "longitude": self.longitude,
-            "added_date": self.added_date.isoformat(),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "Location":
-        """Create Location from dictionary."""
-        added_date = (
-            datetime.fromisoformat(data["added_date"]) if "added_date" in data else datetime.now()
-        )
-        return cls(
-            city=data["city"],
-            country=data["country"],
-            latitude=data["latitude"],
-            longitude=data["longitude"],
-            added_date=added_date,
-        )
-
-    def __str__(self) -> str:
-        return f"{self.city}, {self.country}"
 
 
 @dataclass
 class ForecastData:
-    """Represents forecast data for a specific date."""
+    """A one-day forecast summary in canonical metric units."""
 
     date: datetime
     temperature_min: float
@@ -118,10 +145,10 @@ class ForecastData:
     humidity: int
     wind_speed: float
     description: str
-    precipitation_chance: int = 0  # percentage
+    precipitation_chance: int = 0
+    icon: str = ""
 
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
+    def to_dict(self) -> dict[str, Any]:
         return {
             "date": self.date.isoformat(),
             "temperature_min": self.temperature_min,
@@ -130,182 +157,33 @@ class ForecastData:
             "wind_speed": self.wind_speed,
             "description": self.description,
             "precipitation_chance": self.precipitation_chance,
+            "icon": self.icon,
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ForecastData":
-        """Create ForecastData from dictionary."""
+    def from_dict(cls, data: dict[str, Any]) -> ForecastData:
         return cls(
             date=datetime.fromisoformat(data["date"]),
-            temperature_min=data["temperature_min"],
-            temperature_max=data["temperature_max"],
-            humidity=data["humidity"],
-            wind_speed=data["wind_speed"],
+            temperature_min=float(data["temperature_min"]),
+            temperature_max=float(data["temperature_max"]),
+            humidity=int(data["humidity"]),
+            wind_speed=float(data["wind_speed"]),
             description=data["description"],
-            precipitation_chance=data.get("precipitation_chance", 0),
+            precipitation_chance=int(data.get("precipitation_chance", 0)),
+            icon=data.get("icon", ""),
         )
-
-
-class LocationNode:
-    """Node for the linked list containing a Location and reference to next node."""
-
-    def __init__(self, location: Location):
-        self.location = location
-        self.next: LocationNode | None = None
-
-
-class FavoriteLocationsLinkedList:
-    """
-    Linked list implementation for managing favorite locations.
-
-    Benefits over arrays:
-    - Dynamic size: No need to pre-allocate fixed memory
-    - Efficient insertions/deletions: O(1) at head, O(n) at arbitrary position
-    - Memory efficient: Only allocates memory for actual data
-    - Easy reordering: Can easily move nodes around
-    - No array resizing overhead when adding/removing locations
-    """
-
-    def __init__(self):
-        self.head: LocationNode | None = None
-        self.size = 0
-
-    def add_location(self, location: Location) -> bool:
-        """
-        Add a location to the beginning of the list.
-        Returns True if successful, False if location already exists.
-        """
-        # Check if location already exists
-        if self.find_location(location.city, location.country):
-            return False
-
-        new_node = LocationNode(location)
-        new_node.next = self.head
-        self.head = new_node
-        self.size += 1
-        return True
-
-    def remove_location(self, city: str, country: str) -> bool:
-        """
-        Remove a location from the list.
-        Returns True if successful, False if not found.
-        """
-        if not self.head:
-            return False
-
-        # If head node contains the location to remove
-        if (
-            self.head.location.city.lower() == city.lower()
-            and self.head.location.country.lower() == country.lower()
-        ):
-            self.head = self.head.next
-            self.size -= 1
-            return True
-
-        # Search for the location in the rest of the list
-        current = self.head
-        while current.next:
-            if (
-                current.next.location.city.lower() == city.lower()
-                and current.next.location.country.lower() == country.lower()
-            ):
-                current.next = current.next.next
-                self.size -= 1
-                return True
-            current = current.next
-
-        return False
-
-    def find_location(self, city: str, country: str) -> Location | None:
-        """Find a location in the list. Returns None if not found."""
-        current = self.head
-        while current:
-            if (
-                current.location.city.lower() == city.lower()
-                and current.location.country.lower() == country.lower()
-            ):
-                return current.location
-            current = current.next
-        return None
-
-    def get_all_locations(self) -> list[Location]:
-        """Return a list of all locations."""
-        locations = []
-        current = self.head
-        while current:
-            locations.append(current.location)
-            current = current.next
-        return locations
-
-    def is_empty(self) -> bool:
-        """Check if the list is empty."""
-        return self.head is None
-
-    def get_size(self) -> int:
-        """Get the number of locations in the list."""
-        return self.size
-
-    def move_to_front(self, city: str, country: str) -> bool:
-        """
-        Move a location to the front of the list (most recently accessed).
-        Returns True if successful, False if not found.
-        """
-        if not self.head:
-            return False
-
-        # If already at front
-        if (
-            self.head.location.city.lower() == city.lower()
-            and self.head.location.country.lower() == country.lower()
-        ):
-            return True
-
-        # Find the location and remove it
-        current = self.head
-        while current.next:
-            if (
-                current.next.location.city.lower() == city.lower()
-                and current.next.location.country.lower() == country.lower()
-            ):
-                # Remove the node
-                node_to_move = current.next
-                current.next = current.next.next
-
-                # Add it to the front
-                node_to_move.next = self.head
-                self.head = node_to_move
-                return True
-            current = current.next
-
-        return False
-
-    def to_dict_list(self) -> list[dict]:
-        """Convert all locations to a list of dictionaries for JSON serialization."""
-        return [location.to_dict() for location in self.get_all_locations()]
-
-    def from_dict_list(self, data_list: list[dict]) -> None:
-        """Load locations from a list of dictionaries."""
-        # Clear existing list
-        self.head = None
-        self.size = 0
-
-        # Add locations in reverse order to maintain original order
-        for data in reversed(data_list):
-            location = Location.from_dict(data)
-            self.add_location(location)
 
 
 @dataclass
 class WeatherQuery:
-    """Represents a historical weather query for tracking user searches."""
+    """One entry in the query history."""
 
     location: Location
     query_time: datetime
     weather_data: WeatherData | None = None
-    query_type: str = "current"  # "current", "forecast", "historical"
+    query_type: str = "current"  # "current" or "forecast"
 
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
+    def to_dict(self) -> dict[str, Any]:
         return {
             "location": self.location.to_dict(),
             "query_time": self.query_time.isoformat(),
@@ -314,14 +192,108 @@ class WeatherQuery:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "WeatherQuery":
-        """Create WeatherQuery from dictionary."""
-        weather_data = (
-            WeatherData.from_dict(data["weather_data"]) if data.get("weather_data") else None
-        )
+    def from_dict(cls, data: dict[str, Any]) -> WeatherQuery:
+        weather = data.get("weather_data")
         return cls(
             location=Location.from_dict(data["location"]),
             query_time=datetime.fromisoformat(data["query_time"]),
-            weather_data=weather_data,
+            weather_data=WeatherData.from_dict(weather) if weather else None,
             query_type=data.get("query_type", "current"),
         )
+
+
+class LocationNode:
+    """A node in :class:`FavoriteLocationsLinkedList`."""
+
+    __slots__ = ("location", "next")
+
+    def __init__(self, location: Location) -> None:
+        self.location = location
+        self.next: LocationNode | None = None
+
+
+class FavoriteLocationsLinkedList:
+    """Favorite locations as a singly linked list, most recently used first.
+
+    The container supports ``len()``, iteration and ``in`` (by location
+    identity), alongside the explicit methods used by the interfaces.
+    """
+
+    def __init__(self, locations: list[Location] | None = None) -> None:
+        self.head: LocationNode | None = None
+        self.size = 0
+        for location in reversed(locations or []):
+            self.add_location(location)
+
+    def __len__(self) -> int:
+        return self.size
+
+    def __iter__(self) -> Iterator[Location]:
+        node = self.head
+        while node is not None:
+            yield node.location
+            node = node.next
+
+    def __contains__(self, item: object) -> bool:
+        if not isinstance(item, Location):
+            return False
+        return self.find_location(item.city, item.country) is not None
+
+    def add_location(self, location: Location) -> bool:
+        """Push ``location`` onto the front. Returns False if it is already present."""
+        if location in self:
+            return False
+        node = LocationNode(location)
+        node.next = self.head
+        self.head = node
+        self.size += 1
+        return True
+
+    def _unlink(self, city: str, country: str) -> LocationNode | None:
+        """Remove and return the node for ``city``/``country``, or None if absent."""
+        previous: LocationNode | None = None
+        node = self.head
+        while node is not None:
+            if node.location.matches(city, country):
+                if previous is None:
+                    self.head = node.next
+                else:
+                    previous.next = node.next
+                node.next = None
+                self.size -= 1
+                return node
+            previous, node = node, node.next
+        return None
+
+    def remove_location(self, city: str, country: str) -> bool:
+        """Remove a location. Returns False if it was not in the list."""
+        return self._unlink(city, country) is not None
+
+    def find_location(self, city: str, country: str) -> Location | None:
+        return next((loc for loc in self if loc.matches(city, country)), None)
+
+    def move_to_front(self, city: str, country: str) -> bool:
+        """Move a location to the head of the list. Returns False if absent."""
+        node = self._unlink(city, country)
+        if node is None:
+            return False
+        node.next = self.head
+        self.head = node
+        self.size += 1
+        return True
+
+    def get_all_locations(self) -> list[Location]:
+        return list(self)
+
+    def is_empty(self) -> bool:
+        return self.head is None
+
+    def get_size(self) -> int:
+        return self.size
+
+    def to_dict_list(self) -> list[dict[str, Any]]:
+        return [location.to_dict() for location in self]
+
+    @classmethod
+    def from_dict_list(cls, data_list: list[dict[str, Any]]) -> FavoriteLocationsLinkedList:
+        return cls([Location.from_dict(item) for item in data_list])

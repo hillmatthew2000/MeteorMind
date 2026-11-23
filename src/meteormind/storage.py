@@ -181,7 +181,7 @@ class DataManager:
             data = self._safe_json_load(self.favorites_file, {})
 
             if data and "locations" in data:
-                locations_list.from_dict_list(data["locations"])
+                locations_list = FavoriteLocationsLinkedList.from_dict_list(data["locations"])
                 print(f"Loaded {locations_list.get_size()} favorite locations")
             else:
                 # Create with some default locations for first-time users

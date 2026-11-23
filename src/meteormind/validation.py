@@ -1,62 +1,43 @@
-"""
-Input validation and error handling for the weather application.
+"""Validation of user input: city names, country codes and menu choices.
 
-This module provides comprehensive validation for user inputs including:
-- City names and location validation
-- Date and time validation
-- API response validation
-- User preference validation
-- Graceful error handling with user-friendly messages
+Validators return a :class:`ValidationResult` rather than raising, so the
+interfaces can show the message and any suggestions next to the input.
 """
 
-import datetime
+from __future__ import annotations
+
 import re
-from dataclasses import dataclass
+import unicodedata
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
+
+MAX_CITY_NAME_LENGTH = 100
+
+# Punctuation that legitimately appears in place names ("St. John's", "Aix-en-Provence").
+_CITY_PUNCTUATION = frozenset(" -.'’")
 
 
 @dataclass
 class ValidationResult:
-    """Result of a validation operation."""
+    """Outcome of validating one input value."""
 
     is_valid: bool
     value: Any = None
     error_message: str = ""
-    suggestions: list[str] | None = None
+    suggestions: list[str] = field(default_factory=list)
 
-    def __post_init__(self):
-        if self.suggestions is None:
-            self.suggestions = []
+
+def _is_letter(char: str) -> bool:
+    # Letters (L*) and combining marks (M*) in any script.
+    return unicodedata.category(char)[0] in "LM"
 
 
 class InputValidator:
-    """
-    Comprehensive input validation for weather application.
+    """Validators for the values users type into the CLI and GUI."""
 
-    Features:
-    - City name validation with common pattern checking
-    - Country code validation
-    - Date and time validation
-    - Numeric input validation
-    - API response validation
-    - User-friendly error messages with suggestions
-    """
+    COUNTRY_CODE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^[A-Z]{2}$")
 
-    # Common city name patterns
-    CITY_NAME_PATTERN = re.compile(r"^[a-zA-Z\s\-\.\'\u00C0-\u017F]+$")
-
-    # Country code patterns (ISO 3166-1 alpha-2)
-    COUNTRY_CODE_PATTERN = re.compile(r"^[A-Z]{2}$")
-
-    # Common invalid city name patterns to catch
-    INVALID_PATTERNS: ClassVar[list[tuple[re.Pattern[str], str]]] = [
-        (re.compile(r"^\d+$"), "City name cannot be only numbers"),
-        (re.compile(r"^[^a-zA-Z]+$"), "City name must contain letters"),
-        (re.compile(r".{100,}"), "City name is too long (max 100 characters)"),
-        (re.compile(r"^$"), "City name cannot be empty"),
-    ]
-
-    # Common country codes for suggestions
     COMMON_COUNTRIES: ClassVar[dict[str, str]] = {
         "US": "United States",
         "GB": "United Kingdom",
@@ -71,7 +52,6 @@ class InputValidator:
         "IN": "India",
         "BR": "Brazil",
         "MX": "Mexico",
-        "RU": "Russia",
         "ZA": "South Africa",
         "NZ": "New Zealand",
         "NL": "Netherlands",
@@ -81,187 +61,76 @@ class InputValidator:
     }
 
     @classmethod
-    def validate_city_name(cls, city_name: str) -> ValidationResult:
-        """
-        Validate city name input.
+    def validate_city_name(cls, city_name: object) -> ValidationResult:
+        """Accept place names in any script; reject digits and stray symbols.
 
-        Args:
-            city_name: City name to validate
-
-        Returns:
-            ValidationResult with validation status and suggestions
+        The returned value has surrounding and repeated whitespace removed but
+        keeps the user's capitalisation (``.title()`` would mangle names such
+        as "McAllen").
         """
         if not isinstance(city_name, str):
+            return ValidationResult(False, error_message="City name must be text")
+
+        name = " ".join(city_name.split())
+        examples = ["Try a city name such as 'Paris', 'São Paulo' or 'New York'"]
+        if not name:
             return ValidationResult(
-                is_valid=False,
-                error_message="City name must be text",
-                suggestions=["Enter a valid city name like 'London' or 'New York'"],
+                False, error_message="City name cannot be empty", suggestions=examples
             )
-
-        # Trim whitespace
-        city_name = city_name.strip()
-
-        # Check for common invalid patterns
-        for pattern, message in cls.INVALID_PATTERNS:
-            if pattern.match(city_name):
-                return ValidationResult(
-                    is_valid=False,
-                    error_message=message,
-                    suggestions=[
-                        "Try entering a valid city name like 'Paris', 'Tokyo', or 'Sydney'"
-                    ],
-                )
-
-        # Check basic pattern
-        if not cls.CITY_NAME_PATTERN.match(city_name):
+        if len(name) > MAX_CITY_NAME_LENGTH:
             return ValidationResult(
-                is_valid=False,
+                False,
+                error_message=f"City name is too long (max {MAX_CITY_NAME_LENGTH} characters)",
+            )
+        if not any(_is_letter(ch) for ch in name):
+            return ValidationResult(
+                False, error_message="City name must contain letters", suggestions=examples
+            )
+        if any(not (_is_letter(ch) or ch in _CITY_PUNCTUATION) for ch in name):
+            return ValidationResult(
+                False,
                 error_message="City name contains invalid characters",
                 suggestions=[
-                    "City names can only contain letters, spaces, hyphens, periods, and apostrophes",
-                    "Examples: 'New York', 'São Paulo', 'Al-Qāhirah'",
+                    "Use letters, spaces, hyphens, periods and apostrophes only",
+                    "Add the country separately, or after a comma: 'Paris, FR'",
                 ],
             )
-
-        # Additional checks
-        if len(city_name) < 2:
-            return ValidationResult(
-                is_valid=False,
-                error_message="City name is too short",
-                suggestions=["Enter at least 2 characters"],
-            )
-
-        # Check for obvious typos or test inputs
-        test_patterns = ["test", "asdf", "qwerty", "aaaaa"]
-        if city_name.lower() in test_patterns:
-            return ValidationResult(
-                is_valid=False,
-                error_message="Please enter a real city name",
-                suggestions=["Try: London, Paris, New York, Tokyo, Sydney"],
-            )
-
-        return ValidationResult(
-            is_valid=True,
-            value=city_name.title(),  # Capitalize properly
-            suggestions=[],
-        )
+        if len(name) < 2:
+            return ValidationResult(False, error_message="City name is too short")
+        return ValidationResult(True, value=name)
 
     @classmethod
     def validate_country_code(cls, country_code: str | None) -> ValidationResult:
-        """
-        Validate country code input.
-
-        Args:
-            country_code: Country code to validate (optional)
-
-        Returns:
-            ValidationResult with validation status
-        """
-        if country_code is None or country_code.strip() == "":
+        """Validate an optional ISO 3166-1 alpha-2 code; returns it upper-cased."""
+        if country_code is None or not country_code.strip():
+            return ValidationResult(True, value=None)
+        code = country_code.strip().upper()
+        if not cls.COUNTRY_CODE_PATTERN.match(code):
+            common = ", ".join(list(cls.COMMON_COUNTRIES)[:10])
             return ValidationResult(
-                is_valid=True,
-                value=None,
-                suggestions=["Country code is optional but can improve search accuracy"],
+                False,
+                error_message="Country code must be exactly 2 letters (ISO 3166-1)",
+                suggestions=[f"Common codes: {common}"],
             )
-
-        if not isinstance(country_code, str):
-            return ValidationResult(
-                is_valid=False,
-                error_message="Country code must be text",
-                suggestions=["Use 2-letter codes like 'US', 'GB', 'CA'"],
-            )
-
-        country_code = country_code.strip().upper()
-
-        if not cls.COUNTRY_CODE_PATTERN.match(country_code):
-            return ValidationResult(
-                is_valid=False,
-                error_message="Country code must be exactly 2 letters",
-                suggestions=[
-                    "Use ISO 3166-1 alpha-2 codes",
-                    f"Common codes: {', '.join(list(cls.COMMON_COUNTRIES.keys())[:10])}",
-                ],
-            )
-
-        # Provide friendly name if available
-        suggestions = []
-        if country_code in cls.COMMON_COUNTRIES:
-            suggestions.append(f"{country_code} = {cls.COMMON_COUNTRIES[country_code]}")
-        else:
-            suggestions.append("Make sure you're using the correct 2-letter country code")
-
-        return ValidationResult(is_valid=True, value=country_code, suggestions=suggestions)
+        return ValidationResult(True, value=code)
 
     @classmethod
-    def validate_date_input(cls, date_input: str) -> ValidationResult:
+    def parse_location_query(cls, query: str) -> ValidationResult:
+        """Parse ``"City"`` or ``"City, CC"`` into a validated ``(city, country)`` pair.
+
+        Only a trailing two-letter part is treated as a country code, so
+        "Paris, Texas" is searched as a whole rather than rejected.
         """
-        Validate date input with multiple format support.
-
-        Args:
-            date_input: Date string to validate
-
-        Returns:
-            ValidationResult with parsed date
-        """
-        if not isinstance(date_input, str) or not date_input.strip():
-            return ValidationResult(
-                is_valid=False,
-                error_message="Date cannot be empty",
-                suggestions=["Format: YYYY-MM-DD, MM/DD/YYYY, or DD/MM/YYYY"],
-            )
-
-        date_input = date_input.strip()
-
-        # Supported date formats
-        date_formats = [
-            ("%Y-%m-%d", "YYYY-MM-DD"),
-            ("%m/%d/%Y", "MM/DD/YYYY"),
-            ("%d/%m/%Y", "DD/MM/YYYY"),
-            ("%Y/%m/%d", "YYYY/MM/DD"),
-            ("%d-%m-%Y", "DD-MM-YYYY"),
-            ("%m-%d-%Y", "MM-DD-YYYY"),
-        ]
-
-        parsed_date = None
-        for date_format, _format_name in date_formats:
-            try:
-                parsed_date = datetime.datetime.strptime(date_input, date_format).date()
-                break
-            except ValueError:
-                continue
-
-        if parsed_date is None:
-            return ValidationResult(
-                is_valid=False,
-                error_message="Invalid date format",
-                suggestions=[
-                    "Supported formats:",
-                    "  • YYYY-MM-DD (2024-01-15)",
-                    "  • MM/DD/YYYY (01/15/2024)",
-                    "  • DD/MM/YYYY (15/01/2024)",
-                ],
-            )
-
-        # Check if date is reasonable
-        today = datetime.date.today()
-        min_date = today - datetime.timedelta(days=365 * 5)  # 5 years ago
-        max_date = today + datetime.timedelta(days=30)  # 30 days in future
-
-        if parsed_date < min_date:
-            return ValidationResult(
-                is_valid=False,
-                error_message="Date is too far in the past",
-                suggestions=[f"Please use a date after {min_date}"],
-            )
-
-        if parsed_date > max_date:
-            return ValidationResult(
-                is_valid=False,
-                error_message="Date is too far in the future",
-                suggestions=[f"Please use a date before {max_date}"],
-            )
-
-        return ValidationResult(is_valid=True, value=parsed_date, suggestions=[])
+        city, _, country = query.rpartition(",")
+        if not city or len(country.strip()) != 2:
+            city, country = query, ""
+        city_result = cls.validate_city_name(city.replace(",", " "))
+        if not city_result.is_valid:
+            return city_result
+        country_result = cls.validate_country_code(country)
+        if not country_result.is_valid:
+            return country_result
+        return ValidationResult(True, value=(city_result.value, country_result.value))
 
     @classmethod
     def validate_numeric_input(
@@ -272,200 +141,58 @@ class InputValidator:
         allow_negative: bool = True,
         decimal_places: int | None = None,
     ) -> ValidationResult:
-        """
-        Validate numeric input with constraints.
-
-        Args:
-            value: String value to validate
-            min_value: Minimum allowed value
-            max_value: Maximum allowed value
-            allow_negative: Whether negative values are allowed
-            decimal_places: Maximum decimal places allowed
-
-        Returns:
-            ValidationResult with parsed numeric value
-        """
+        """Parse a number and check it against optional bounds."""
         if not isinstance(value, str) or not value.strip():
-            return ValidationResult(
-                is_valid=False,
-                error_message="Value cannot be empty",
-                suggestions=["Enter a valid number"],
-            )
-
-        value = value.strip()
-
+            return ValidationResult(False, error_message="Value cannot be empty")
+        text = value.strip()
         try:
-            numeric_value = float(value)
+            number = float(text)
         except ValueError:
-            return ValidationResult(
-                is_valid=False,
-                error_message="Invalid number format",
-                suggestions=["Enter a valid number (e.g., 25, 25.5, -10)"],
-            )
-
-        # Check constraints
-        if not allow_negative and numeric_value < 0:
-            return ValidationResult(
-                is_valid=False,
-                error_message="Negative values are not allowed",
-                suggestions=["Enter a positive number"],
-            )
-
-        if min_value is not None and numeric_value < min_value:
-            return ValidationResult(
-                is_valid=False,
-                error_message=f"Value must be at least {min_value}",
-                suggestions=[f"Enter a value >= {min_value}"],
-            )
-
-        if max_value is not None and numeric_value > max_value:
-            return ValidationResult(
-                is_valid=False,
-                error_message=f"Value must be at most {max_value}",
-                suggestions=[f"Enter a value <= {max_value}"],
-            )
-
-        # Check decimal places
+            return ValidationResult(False, error_message=f"'{text}' is not a number")
+        if not allow_negative and number < 0:
+            return ValidationResult(False, error_message="Negative values are not allowed")
+        if min_value is not None and number < min_value:
+            return ValidationResult(False, error_message=f"Value must be at least {min_value:g}")
+        if max_value is not None and number > max_value:
+            return ValidationResult(False, error_message=f"Value must be at most {max_value:g}")
         if decimal_places is not None:
-            decimal_part = str(numeric_value).split(".")[-1] if "." in str(numeric_value) else ""
-            if len(decimal_part) > decimal_places:
+            _, _, fraction = text.partition(".")
+            if len(fraction.rstrip("0")) > decimal_places:
+                if decimal_places == 0:
+                    return ValidationResult(False, error_message="Enter a whole number")
                 return ValidationResult(
-                    is_valid=False,
-                    error_message=f"Too many decimal places (max {decimal_places})",
-                    suggestions=[f"Round to {decimal_places} decimal places"],
+                    False, error_message=f"Use at most {decimal_places} decimal places"
                 )
-
-        return ValidationResult(is_valid=True, value=numeric_value, suggestions=[])
-
-    @classmethod
-    def validate_unit_preference(cls, unit_type: str, unit_value: str) -> ValidationResult:
-        """
-        Validate unit preference selection.
-
-        Args:
-            unit_type: Type of unit (temperature, wind_speed, pressure, distance)
-            unit_value: Unit value to validate
-
-        Returns:
-            ValidationResult with validation status
-        """
-        valid_units = {
-            "temperature": ["celsius", "fahrenheit", "kelvin"],
-            "wind_speed": ["mps", "kmh", "mph", "knots"],
-            "pressure": ["hpa", "inhg", "mbar", "atm"],
-            "distance": ["km", "miles", "m", "ft"],
-        }
-
-        if unit_type not in valid_units:
-            return ValidationResult(
-                is_valid=False,
-                error_message=f"Unknown unit type: {unit_type}",
-                suggestions=[f"Valid types: {', '.join(valid_units.keys())}"],
-            )
-
-        if not isinstance(unit_value, str):
-            return ValidationResult(
-                is_valid=False, error_message="Unit value must be text", suggestions=[]
-            )
-
-        unit_value = unit_value.lower().strip()
-
-        if unit_value not in valid_units[unit_type]:
-            return ValidationResult(
-                is_valid=False,
-                error_message=f"Invalid {unit_type} unit: {unit_value}",
-                suggestions=[f"Valid options: {', '.join(valid_units[unit_type])}"],
-            )
-
-        return ValidationResult(is_valid=True, value=unit_value, suggestions=[])
+        return ValidationResult(True, value=number)
 
 
-class APIResponseValidator:
-    """Validates API responses and handles API errors gracefully."""
+def safe_input(
+    prompt: str,
+    validator_func: Callable[[str], ValidationResult] | None = None,
+    max_attempts: int = 3,
+) -> Any | None:
+    """Prompt until the validator accepts the input.
 
-    @staticmethod
-    def validate_weather_response(response_data: dict[str, Any]) -> ValidationResult:
-        """
-        Validate weather API response data.
-
-        Args:
-            response_data: Raw API response data
-
-        Returns:
-            ValidationResult indicating if response is valid
-        """
-        required_fields = ["name", "main", "weather", "sys"]
-        required_main_fields = ["temp", "humidity", "pressure"]
-
-        # Check top-level fields
-        for field in required_fields:
-            if field not in response_data:
-                return ValidationResult(
-                    is_valid=False,
-                    error_message=f"Missing required field: {field}",
-                    suggestions=["API response is incomplete"],
-                )
-
-        # Check main weather data
-        main_data = response_data.get("main", {})
-        for field in required_main_fields:
-            if field not in main_data:
-                return ValidationResult(
-                    is_valid=False,
-                    error_message=f"Missing weather data: {field}",
-                    suggestions=["Weather data is incomplete"],
-                )
-
-        # Validate weather array
-        weather_array = response_data.get("weather", [])
-        if not weather_array or not isinstance(weather_array, list):
-            return ValidationResult(
-                is_valid=False,
-                error_message="Missing weather description",
-                suggestions=["Weather description is unavailable"],
-            )
-
-        return ValidationResult(is_valid=True, value=response_data, suggestions=[])
-
-    @staticmethod
-    def validate_forecast_response(response_data: dict[str, Any]) -> ValidationResult:
-        """
-        Validate forecast API response data.
-
-        Args:
-            response_data: Raw forecast API response data
-
-        Returns:
-            ValidationResult indicating if response is valid
-        """
-        if "list" not in response_data:
-            return ValidationResult(
-                is_valid=False,
-                error_message="Missing forecast data",
-                suggestions=["Forecast data is unavailable"],
-            )
-
-        forecast_list = response_data["list"]
-        if not isinstance(forecast_list, list) or len(forecast_list) == 0:
-            return ValidationResult(
-                is_valid=False,
-                error_message="Empty forecast data",
-                suggestions=["No forecast data available"],
-            )
-
-        # Validate first forecast item
-        first_item = forecast_list[0]
-        required_fields = ["dt", "main", "weather"]
-
-        for field in required_fields:
-            if field not in first_item:
-                return ValidationResult(
-                    is_valid=False,
-                    error_message=f"Invalid forecast data: missing {field}",
-                    suggestions=["Forecast data is malformed"],
-                )
-
-        return ValidationResult(is_valid=True, value=response_data, suggestions=[])
+    Returns the validated value, the raw text when no validator is given, or
+    None when input is cancelled (Ctrl+C / end of input) or attempts run out.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            text = input(prompt).strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return None
+        if validator_func is None:
+            return text
+        result = validator_func(text)
+        if result.is_valid:
+            return result.value
+        print(f"❌ {result.error_message}")
+        for suggestion in result.suggestions:
+            print(f"   💡 {suggestion}")
+        if attempt < max_attempts:
+            print(f"   Try again ({max_attempts - attempt} attempts remaining)")
+    return None
 
 
 class ErrorHandler:
@@ -570,79 +297,3 @@ class ErrorHandler:
                     "Report this issue if it persists",
                 ],
             )
-
-
-def safe_input(prompt: str, validator_func=None, max_attempts: int = 3) -> Any | None:
-    """
-    Get user input with validation and error handling.
-
-    Args:
-        prompt: Input prompt to display
-        validator_func: Function to validate input (returns ValidationResult)
-        max_attempts: Maximum number of input attempts
-
-    Returns:
-        Validated input value or None if max attempts exceeded
-    """
-    for attempt in range(max_attempts):
-        try:
-            user_input = input(prompt).strip()
-
-            if validator_func:
-                result = validator_func(user_input)
-                if result.is_valid:
-                    if result.suggestions:
-                        for suggestion in result.suggestions:
-                            print(f"💡 {suggestion}")
-                    return result.value
-                else:
-                    print(f"❌ {result.error_message}")
-                    if result.suggestions:
-                        for suggestion in result.suggestions:
-                            print(f"   💡 {suggestion}")
-
-                    if attempt < max_attempts - 1:
-                        print(f"   Try again ({max_attempts - attempt - 1} attempts remaining)...")
-                    continue
-            else:
-                return user_input
-
-        except (KeyboardInterrupt, EOFError):
-            print("\nInput cancelled.")
-            return None
-        except Exception as e:
-            print(f"Error reading input: {e}")
-            if attempt < max_attempts - 1:
-                print("Please try again...")
-
-    print("❌ Too many failed attempts.")
-    return None
-
-
-if __name__ == "__main__":
-    # Test the validation system
-    print("🔍 Input Validation System Test")
-    print("=" * 40)
-
-    # Test city name validation
-    test_cities = ["London", "New York", "123", "", "São Paulo", "test"]
-    print("\nCity Name Validation:")
-    for city in test_cities:
-        result = InputValidator.validate_city_name(city)
-        status = "✅" if result.is_valid else "❌"
-        print(f"{status} '{city}': {result.error_message or 'Valid'}")
-
-    # Test country code validation
-    test_countries = ["US", "GB", "usa", "123", ""]
-    print("\nCountry Code Validation:")
-    for country in test_countries:
-        result = InputValidator.validate_country_code(country)
-        status = "✅" if result.is_valid else "❌"
-        print(f"{status} '{country}': {result.error_message or 'Valid'}")
-
-    # Test interactive input
-    print("\n🎯 Interactive Input Test:")
-    print("Enter a city name (test the validation):")
-    city = safe_input("City: ", InputValidator.validate_city_name)
-    if city:
-        print(f"✅ Validated city: {city}")
