@@ -30,9 +30,8 @@ Requirements:
 - tkinter (usually included with Python)
 """
 
-import sys
 import argparse
-from typing import Optional
+import sys
 
 from . import __version__
 
@@ -51,29 +50,19 @@ Examples:
   python main.py --help             # Show this help message
 
 For more information, visit: https://openweathermap.org/api
-        """
+        """,
     )
-    
+
+    parser.add_argument("--cli", action="store_true", help="Start command-line interface directly")
+
     parser.add_argument(
-        '--cli', 
-        action='store_true',
-        help='Start command-line interface directly'
+        "--gui", action="store_true", help="Start graphical user interface directly"
     )
-    
-    parser.add_argument(
-        '--gui', 
-        action='store_true', 
-        help='Start graphical user interface directly'
-    )
-    
-    parser.add_argument(
-        '--version', 
-        action='version', 
-        version=f'MeteorMind {__version__}'
-    )
-    
+
+    parser.add_argument("--version", action="version", version=f"MeteorMind {__version__}")
+
     args = parser.parse_args()
-    
+
     # If specific interface is requested
     if args.cli:
         start_cli()
@@ -106,25 +95,25 @@ def show_interface_selection():
     print()
     print("4. 🚪 Exit")
     print()
-    
+
     while True:
         try:
             choice = input("Enter your choice (1-4): ").strip()
-            
-            if choice == '1':
+
+            if choice == "1":
                 start_cli()
                 break
-            elif choice == '2':
+            elif choice == "2":
                 start_gui()
                 break
-            elif choice == '3':
+            elif choice == "3":
                 show_help()
-            elif choice == '4':
+            elif choice == "4":
                 print("\nGoodbye! Stay weather-aware! 🌈")
                 sys.exit(0)
             else:
                 print("❌ Invalid choice. Please enter 1, 2, 3, or 4.")
-                
+
         except KeyboardInterrupt:
             print("\n\nGoodbye! Stay weather-aware! 🌈")
             sys.exit(0)
@@ -137,12 +126,13 @@ def start_cli():
     """Start the command-line interface."""
     try:
         from .cli import WeatherCLI
+
         print("\n🚀 Starting Command Line Interface...")
         print("=" * 50)
-        
+
         cli = WeatherCLI()
         cli.run()
-        
+
     except ImportError as e:
         print(f"❌ Error importing CLI module: {e}")
         print("Please ensure all required files are present.")
@@ -156,18 +146,19 @@ def start_gui():
     """Start the graphical user interface."""
     try:
         import tkinter as tk
+
         from .gui import WeatherGUI
-        
+
         print("\n🚀 Starting Graphical User Interface...")
         print("=" * 50)
-        
+
         # Create root window
         root = tk.Tk()
-        app = WeatherGUI(root)
-        
+        WeatherGUI(root)
+
         # Start the GUI main loop
         root.mainloop()
-        
+
     except ImportError as e:
         print(f"❌ Error importing GUI modules: {e}")
         print("Please ensure tkinter is installed and all required files are present.")
@@ -229,6 +220,7 @@ def main():
         print(f"\n❌ Fatal error: {e}")
         print("Please check your installation and try again.")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
