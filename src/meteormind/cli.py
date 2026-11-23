@@ -10,12 +10,11 @@ This module provides a clear, numbered menu-driven interface that allows users t
 - Configure API settings
 """
 
-import os
 import sys
 from datetime import datetime
 
-from .api import APIError, WeatherAPIHandler
-from .config import ConfigManager
+from .api import APIError, WeatherAPIHandler, describe_error
+from .config import ConfigError, ConfigManager
 from .history import HistoryManager
 
 # Import our custom modules
@@ -28,7 +27,7 @@ from .units import (
     create_imperial_preferences,
     create_metric_preferences,
 )
-from .validation import ErrorHandler, InputValidator, safe_input
+from .validation import InputValidator, ValidationResult, safe_input
 
 
 class WeatherCLI:
@@ -235,7 +234,7 @@ class WeatherCLI:
                         print(f"ℹ️  {location} is already in favorites.")
 
         except APIError as e:
-            error_msg, suggestions = ErrorHandler.handle_api_error(e)
+            error_msg, suggestions = describe_error(e)
             print(f"❌ {error_msg}")
             for suggestion in suggestions:
                 print(f"   💡 {suggestion}")
@@ -316,7 +315,7 @@ class WeatherCLI:
             self.display_forecast_data(forecast_data, location)
 
         except APIError as e:
-            error_msg, suggestions = ErrorHandler.handle_api_error(e)
+            error_msg, suggestions = describe_error(e)
             print(f"❌ {error_msg}")
             for suggestion in suggestions:
                 print(f"   💡 {suggestion}")
@@ -441,7 +440,7 @@ class WeatherCLI:
                 print(f"ℹ️  {location} is already in your favorites.")
 
         except APIError as e:
-            error_msg, suggestions = ErrorHandler.handle_api_error(e)
+            error_msg, suggestions = describe_error(e)
             print(f"❌ {error_msg}")
             for suggestion in suggestions:
                 print(f"   💡 {suggestion}")
@@ -560,7 +559,7 @@ class WeatherCLI:
             self.data_manager.save_favorite_locations(self.favorite_locations)
 
         except APIError as e:
-            error_msg, suggestions = ErrorHandler.handle_api_error(e)
+            error_msg, suggestions = describe_error(e)
             print(f"❌ {error_msg}")
             for suggestion in suggestions:
                 print(f"   💡 {suggestion}")
@@ -773,7 +772,7 @@ class WeatherCLI:
 
         # Show configuration status
         print("\n" + "=" * 40)
-        self.config_manager.print_configuration_status()
+        self.print_configuration_status()
 
     def clear_cache(self) -> None:
         """Clear weather data cache."""
@@ -895,7 +894,7 @@ For more help, visit: https://openweathermap.org/api
         print("-" * 30)
 
         # Show current status
-        self.config_manager.print_configuration_status()
+        self.print_configuration_status()
 
         print("\nSetup Options:")
         print("1. Configure API key")
@@ -918,13 +917,41 @@ For more help, visit: https://openweathermap.org/api
         elif choice == 5:
             return
 
+    def print_configuration_status(self) -> None:
+        """Print where the API key comes from (masked) and where it would be saved."""
+        status = self.config_manager.check_configuration()
+        print("🔧 Configuration:")
+        if status["api_key_found"]:
+            print(f"   API key:  {status['api_key_masked']} (from {status['api_key_source']})")
+            if not status["api_key_valid_format"]:
+                print("   ⚠️  The key does not look like a 32-character OpenWeatherMap key.")
+        else:
+            print("   API key:  not configured")
+        print(f"   Settings: {status['config_file']}")
+
     def configure_api_key(self) -> None:
         """Configure API key interactively."""
-        from .config import interactive_setup
-
-        interactive_setup()
-
-        # Reinitialize API handler
+        print()
+        print(self.config_manager.get_setup_instructions())
+        api_key = safe_input(
+            "\nPaste your API key (leave empty to cancel): ",
+            lambda text: (
+                ValidationResult(True, value=text)
+                if not text or self.config_manager.validate_api_key(text)
+                else ValidationResult(
+                    False, error_message="An API key is 32 hexadecimal characters."
+                )
+            ),
+        )
+        if not api_key:
+            print("Setup cancelled.")
+            return
+        try:
+            path = self.config_manager.save_api_key(api_key)
+        except ConfigError as e:
+            print(f"❌ {e}")
+            return
+        print(f"✅ API key saved to {path}")
         self._init_api_handler()
 
     def test_api_connection(self) -> None:
@@ -949,7 +976,7 @@ For more help, visit: https://openweathermap.org/api
                 print("❌ API key validation failed.")
 
         except APIError as e:
-            error_msg, suggestions = ErrorHandler.handle_api_error(e)
+            error_msg, suggestions = describe_error(e)
             print(f"❌ {error_msg}")
             for suggestion in suggestions:
                 print(f"   💡 {suggestion}")
@@ -964,16 +991,18 @@ For more help, visit: https://openweathermap.org/api
             .strip()
         )
         if confirm in ["y", "yes"]:
-            # Clear config files
             try:
-                if os.path.exists("config.json"):
-                    os.remove("config.json")
-                if os.path.exists(".env"):
-                    os.remove(".env")
-                print("✅ Configuration reset. Please reconfigure your API key.")
+                removed = self.config_manager.clear_api_key()
+            except ConfigError as e:
+                print(f"❌ {e}")
+                return
+            if removed:
+                print("✅ Saved API key removed.")
+            lookup = self.config_manager.find_api_key()
+            if lookup.found:
+                print(f"ℹ️  A key is still provided by {lookup.source}.")
+            else:
                 self.api_handler = None
-            except Exception as e:
-                print(f"❌ Error resetting configuration: {e}")
         else:
             print("❌ Configuration reset cancelled.")
 
@@ -1149,7 +1178,7 @@ For more help, visit: https://openweathermap.org/api
                 self._export_report(report, f"forecast_{location.city.lower()}")
 
         except APIError as e:
-            error_msg, suggestions = ErrorHandler.handle_api_error(e)
+            error_msg, suggestions = describe_error(e)
             print(f"❌ API Error: {error_msg}")
             if suggestions:
                 print("💡 Suggestions:")

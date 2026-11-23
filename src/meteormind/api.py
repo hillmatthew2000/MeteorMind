@@ -1,400 +1,339 @@
-"""
-API Handler for OpenWeatherMap API integration.
+"""OpenWeatherMap client: geocoding, current weather and five-day forecasts.
 
-This module handles all HTTP requests to the OpenWeatherMap API,
-including current weather, forecasts, and historical data.
-Provides comprehensive error handling and response validation.
+Requests use connect/read timeouts and retry transient server failures with
+exponential backoff. Successful responses are kept in a :class:`ResponseCache`
+so repeated lookups within the cache lifetime do not spend API calls.
+
+Every failure is raised as an :class:`APIError` subclass whose message and
+``suggestions`` are written for end users.
 """
 
-import json
-import os
-from datetime import datetime
+from __future__ import annotations
+
+import logging
+from collections import Counter, defaultdict
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Protocol
+from urllib.parse import urlencode
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
+from .cache import ResponseCache
+from .config import ConfigManager
 from .models import ForecastData, Location, WeatherData
+
+logger = logging.getLogger(__name__)
+
+MAX_FORECAST_DAYS = 5
 
 
 class APIError(Exception):
-    """Custom exception for API-related errors."""
+    """Base class for weather service errors; ``str(error)`` is user-facing."""
 
-    pass
+    default_suggestions: tuple[str, ...] = ("Try again in a few moments.",)
+
+    def __init__(self, message: str, suggestions: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.suggestions = list(self.default_suggestions if suggestions is None else suggestions)
+
+
+class MissingAPIKeyError(APIError):
+    default_suggestions = (
+        "Get a free key at https://home.openweathermap.org/users/sign_up",
+        "Set the OPENWEATHER_API_KEY environment variable or save the key in the app settings.",
+    )
+
+
+class AuthenticationError(APIError):
+    default_suggestions = (
+        "Check the key in the app settings or your OPENWEATHER_API_KEY variable.",
+        "Newly created keys can take up to two hours to activate.",
+    )
+
+
+class LocationNotFoundError(APIError):
+    default_suggestions = (
+        "Check the spelling of the city name.",
+        "Add a country code, for example 'Paris, FR'.",
+    )
+
+
+class RateLimitError(APIError):
+    default_suggestions = (
+        "Wait a minute before trying again; the free plan allows 60 calls per minute.",
+    )
+
+
+class NetworkError(APIError):
+    default_suggestions = (
+        "Check your internet connection.",
+        "Try again in a few moments.",
+    )
+
+
+class ServiceError(APIError):
+    default_suggestions = ("OpenWeatherMap may be having problems; try again later.",)
+
+
+def describe_error(error: APIError) -> tuple[str, list[str]]:
+    """Return ``(message, suggestions)`` for showing ``error`` to a user."""
+    return str(error), error.suggestions
+
+
+class WeatherProvider(Protocol):
+    """The operations the interfaces need from a weather source."""
+
+    def search_locations(
+        self, city_name: str, country_code: str | None = None, limit: int = 5
+    ) -> list[Location]: ...
+
+    def get_location_by_name(self, city_name: str, country_code: str | None = None) -> Location: ...
+
+    def get_current_weather(self, location: Location) -> WeatherData: ...
+
+    def get_forecast(
+        self, location: Location, days: int = MAX_FORECAST_DAYS
+    ) -> list[ForecastData]: ...
+
+
+def build_session(retries: int = 2, backoff_factor: float = 0.5) -> requests.Session:
+    """Create a session that retries idempotent requests on transient failures.
+
+    Rate-limit responses (429) are not retried: the limit is per minute, so an
+    immediate retry would only fail again.
+    """
+    retry = Retry(
+        total=retries,
+        connect=retries,
+        read=retries,
+        status=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=(500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers["User-Agent"] = "MeteorMind"
+    return session
+
+
+def _capitalize(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def _local_time(timestamp: int, utc_offset_seconds: int) -> datetime:
+    """Convert a UTC epoch to naive wall-clock time at a location."""
+    moment = datetime.fromtimestamp(timestamp, tz=timezone.utc) + timedelta(
+        seconds=utc_offset_seconds
+    )
+    return moment.replace(tzinfo=None)
+
+
+def parse_locations(data: Any) -> list[Location]:
+    """Parse a geocoding API response."""
+    if not isinstance(data, list):
+        raise ServiceError("Unexpected response from the geocoding service.")
+    try:
+        return [
+            Location(
+                city=item["name"],
+                country=item.get("country", ""),
+                latitude=float(item["lat"]),
+                longitude=float(item["lon"]),
+                state=item.get("state", ""),
+            )
+            for item in data
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ServiceError("Unexpected response from the geocoding service.") from exc
+
+
+def parse_current_weather(data: Any, location: Location) -> WeatherData:
+    """Parse a current-weather response.
+
+    The place name comes from the geocoded ``location``: the weather endpoint
+    reports its nearest station, which is often a district (searching
+    "London" can return "Clerkenwell").
+    """
+    try:
+        main = data["main"]
+        wind = data.get("wind", {})
+        condition = data["weather"][0]
+        return WeatherData(
+            city=location.city,
+            country=location.country,
+            temperature=float(main["temp"]),
+            feels_like=float(main["feels_like"]),
+            humidity=int(main["humidity"]),
+            pressure=int(main["pressure"]),
+            wind_speed=float(wind.get("speed", 0.0)),
+            wind_direction=int(wind.get("deg", 0)),
+            description=_capitalize(condition["description"]),
+            timestamp=datetime.fromtimestamp(data["dt"]) if "dt" in data else datetime.now(),
+            icon=condition.get("icon", ""),
+            visibility=data.get("visibility"),
+            temp_min=main.get("temp_min"),
+            temp_max=main.get("temp_max"),
+        )
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise ServiceError("Unexpected response from the weather service.") from exc
+
+
+def parse_forecast(data: Any, days: int = MAX_FORECAST_DAYS) -> list[ForecastData]:
+    """Summarise the 3-hourly forecast into one entry per local calendar day.
+
+    Entries are grouped by the date *at the location* (using the city's UTC
+    offset), not by the date on the machine running the app.
+    """
+    try:
+        offset = int(data.get("city", {}).get("timezone", 0))
+        by_day: dict[date, list[dict[str, Any]]] = defaultdict(list)
+        for item in data["list"]:
+            by_day[_local_time(int(item["dt"]), offset).date()].append(item)
+
+        forecasts = []
+        for day in sorted(by_day)[:days]:
+            items = by_day[day]
+            temps = [float(item["main"]["temp"]) for item in items]
+            descriptions = Counter(item["weather"][0]["description"] for item in items)
+            description = descriptions.most_common(1)[0][0]
+            icons = [
+                item["weather"][0].get("icon", "")
+                for item in items
+                if item["weather"][0]["description"] == description
+            ]
+            icon = next((i for i in icons if i.endswith("d")), icons[0] if icons else "")
+            forecasts.append(
+                ForecastData(
+                    date=datetime.combine(day, datetime.min.time()),
+                    temperature_min=min(temps),
+                    temperature_max=max(temps),
+                    humidity=round(sum(item["main"]["humidity"] for item in items) / len(items)),
+                    wind_speed=sum(item.get("wind", {}).get("speed", 0.0) for item in items)
+                    / len(items),
+                    description=_capitalize(description),
+                    precipitation_chance=round(max(item.get("pop", 0) for item in items) * 100),
+                    icon=icon,
+                )
+            )
+        return forecasts
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+        raise ServiceError("Unexpected response from the forecast service.") from exc
 
 
 class WeatherAPIHandler:
-    """
-    Handles all interactions with the OpenWeatherMap API.
-
-    Features:
-    - Current weather data retrieval
-    - 5-day weather forecast
-    - Geocoding for city name to coordinates conversion
-    - Comprehensive error handling
-    - Rate limiting awareness
-    - Secure API key management
-    """
+    """Client for the OpenWeatherMap current weather, forecast and geocoding APIs."""
 
     BASE_URL = "https://api.openweathermap.org/data/2.5"
     GEO_URL = "https://api.openweathermap.org/geo/1.0"
 
-    def __init__(self, api_key: str | None = None):
-        """
-        Initialize the API handler.
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        session: requests.Session | None = None,
+        cache: ResponseCache | None = None,
+        timeout: tuple[float, float] = (5.0, 15.0),
+        config: ConfigManager | None = None,
+    ) -> None:
+        key = api_key or (config or ConfigManager()).get_api_key()
+        if not key:
+            raise MissingAPIKeyError("No OpenWeatherMap API key is configured.")
+        self.api_key = key.strip()
+        self.session = session or build_session()
+        self.cache = cache if cache is not None else ResponseCache()
+        self.timeout = timeout
 
-        Args:
-            api_key: OpenWeatherMap API key. If None, will try to load from environment.
-        """
-        self.api_key = api_key or self._load_api_key()
-        self.session = requests.Session()
-        self.timeout = 10  # 10 second timeout
+    def _get(self, url: str, params: dict[str, Any], *, use_cache: bool = True) -> Any:
+        cache_key = f"{url}?{urlencode(sorted(params.items()))}"
+        if use_cache:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                logger.debug("cache hit: %s", cache_key)
+                return cached
 
-        if not self.api_key:
-            raise APIError(
-                "API key not found. Please set OPENWEATHER_API_KEY environment variable "
-                "or provide it directly to the constructor."
+        try:
+            response = self.session.get(
+                url, params={**params, "appid": self.api_key}, timeout=self.timeout
             )
+        except requests.exceptions.Timeout as exc:
+            raise NetworkError("The weather service took too long to respond.") from exc
+        except requests.exceptions.ConnectionError as exc:
+            raise NetworkError("Could not connect to the weather service.") from exc
+        except requests.exceptions.RequestException as exc:
+            raise NetworkError(f"The request failed: {exc.__class__.__name__}.") from exc
 
-    def _load_api_key(self) -> str | None:
-        """
-        Load API key from environment variables or config file.
-
-        Priority:
-        1. Environment variable OPENWEATHER_API_KEY
-        2. Environment variable WEATHER_API_KEY
-        3. config.json file
-        4. .env file (simple key=value format)
-        """
-        # Try environment variables first
-        api_key = os.getenv("OPENWEATHER_API_KEY") or os.getenv("WEATHER_API_KEY")
-        if api_key:
-            return api_key
-
-        # Try config.json file
-        try:
-            with open("config.json") as f:
-                config = json.load(f)
-                return config.get("api_key")
-        except (FileNotFoundError, json.JSONDecodeError, KeyError):
-            pass
-
-        # Try .env file
-        try:
-            with open(".env") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("OPENWEATHER_API_KEY=") or line.startswith("API_KEY="):
-                        return line.split("=", 1)[1].strip().strip("\"'")
-        except FileNotFoundError:
-            pass
-
-        return None
-
-    def _make_request(self, url: str, params: dict) -> dict:
-        """
-        Make a request to the API with error handling.
-
-        Args:
-            url: The API endpoint URL
-            params: Query parameters for the request
-
-        Returns:
-            Parsed JSON response
-
-        Raises:
-            APIError: For various API-related errors
-        """
-        params["appid"] = self.api_key
+        status = response.status_code
+        if status == 401:
+            raise AuthenticationError("OpenWeatherMap rejected the API key.")
+        if status == 404:
+            raise LocationNotFoundError("That location was not found.")
+        if status == 429:
+            raise RateLimitError("The API rate limit has been reached.")
+        if status >= 500:
+            raise ServiceError(f"The weather service is unavailable (HTTP {status}).")
+        if status >= 400:
+            raise APIError(f"The weather service rejected the request (HTTP {status}).")
 
         try:
-            response = self.session.get(url, params=params, timeout=self.timeout)
-            response.raise_for_status()
-
             data = response.json()
+        except ValueError as exc:
+            raise ServiceError("The weather service returned an invalid response.") from exc
 
-            # Check for API-specific error codes
-            if "cod" in data and str(data["cod"]) != "200":
-                error_msg = data.get("message", "Unknown API error")
-                raise APIError(f"API Error {data['cod']}: {error_msg}")
+        if use_cache:
+            self.cache.set(cache_key, data)
+        return data
 
-            return data
+    def search_locations(
+        self, city_name: str, country_code: str | None = None, limit: int = 5
+    ) -> list[Location]:
+        """Return up to ``limit`` places matching the name, best match first."""
+        query = f"{city_name},{country_code}" if country_code else city_name
+        data = self._get(f"{self.GEO_URL}/direct", {"q": query, "limit": limit})
+        return parse_locations(data)
 
-        except requests.exceptions.Timeout as e:
-            raise APIError("Request timed out. Please check your internet connection.") from e
-        except requests.exceptions.ConnectionError as e:
-            raise APIError("Connection error. Please check your internet connection.") from e
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                raise APIError("Invalid API key. Please check your OpenWeatherMap API key.") from e
-            elif e.response.status_code == 404:
-                raise APIError("Location not found. Please check the city name.") from e
-            elif e.response.status_code == 429:
-                raise APIError("API rate limit exceeded. Please try again later.") from e
-            else:
-                raise APIError(f"HTTP Error {e.response.status_code}: {e.response.reason}") from e
-        except requests.exceptions.RequestException as e:
-            raise APIError(f"Request failed: {e!s}") from e
-        except json.JSONDecodeError as e:
-            raise APIError("Invalid response format from API.") from e
-
-    def get_location_by_name(
-        self, city_name: str, country_code: str | None = None
-    ) -> Location | None:
-        """
-        Get location coordinates by city name using geocoding API.
-
-        Args:
-            city_name: Name of the city
-            country_code: Optional country code (e.g., 'US', 'GB')
-
-        Returns:
-            Location object with coordinates, or None if not found
-        """
-        query = city_name
-        if country_code:
-            query += f",{country_code}"
-
-        url = f"{self.GEO_URL}/direct"
-        params = {"q": query, "limit": 1}
-
-        try:
-            data = self._make_request(url, params)
-
-            if not data:
-                return None
-
-            location_data = data[0]
-            return Location(
-                city=location_data["name"],
-                country=location_data["country"],
-                latitude=location_data["lat"],
-                longitude=location_data["lon"],
-            )
-
-        except APIError:
-            return None
+    def get_location_by_name(self, city_name: str, country_code: str | None = None) -> Location:
+        matches = self.search_locations(city_name, country_code, limit=1)
+        if not matches:
+            where = f"{city_name}, {country_code}" if country_code else city_name
+            raise LocationNotFoundError(f"No place called '{where}' was found.")
+        return matches[0]
 
     def get_current_weather(self, location: Location) -> WeatherData:
-        """
-        Get current weather data for a location.
-
-        Args:
-            location: Location object with coordinates
-
-        Returns:
-            WeatherData object with current weather information
-        """
-        url = f"{self.BASE_URL}/weather"
-        params = {
-            "lat": location.latitude,
-            "lon": location.longitude,
-            "units": "metric",  # Always use metric, conversion handled elsewhere
-        }
-
-        data = self._make_request(url, params)
-
-        return WeatherData(
-            city=data["name"],
-            country=data["sys"]["country"],
-            temperature=data["main"]["temp"],
-            feels_like=data["main"]["feels_like"],
-            humidity=data["main"]["humidity"],
-            pressure=data["main"]["pressure"],
-            wind_speed=data.get("wind", {}).get("speed", 0),
-            wind_direction=data.get("wind", {}).get("deg", 0),
-            description=data["weather"][0]["description"].title(),
-            timestamp=datetime.now(),
-        )
+        params = {"lat": location.latitude, "lon": location.longitude, "units": "metric"}
+        return parse_current_weather(self._get(f"{self.BASE_URL}/weather", params), location)
 
     def get_current_weather_by_name(
         self, city_name: str, country_code: str | None = None
     ) -> tuple[WeatherData, Location]:
-        """
-        Get current weather by city name.
-
-        Args:
-            city_name: Name of the city
-            country_code: Optional country code
-
-        Returns:
-            Tuple of (WeatherData, Location)
-        """
         location = self.get_location_by_name(city_name, country_code)
-        if not location:
-            raise APIError(f"Location '{city_name}' not found.")
+        return self.get_current_weather(location), location
 
-        weather_data = self.get_current_weather(location)
-        return weather_data, location
-
-    def get_forecast(self, location: Location, days: int = 5) -> list[ForecastData]:
-        """
-        Get weather forecast for a location.
-
-        Args:
-            location: Location object with coordinates
-            days: Number of days to forecast (max 5 for free API)
-
-        Returns:
-            List of ForecastData objects
-        """
-        url = f"{self.BASE_URL}/forecast"
+    def get_forecast(self, location: Location, days: int = MAX_FORECAST_DAYS) -> list[ForecastData]:
+        if not 1 <= days <= MAX_FORECAST_DAYS:
+            raise ValueError(f"days must be between 1 and {MAX_FORECAST_DAYS}")
         params = {"lat": location.latitude, "lon": location.longitude, "units": "metric"}
-
-        data = self._make_request(url, params)
-
-        # Group forecast data by day
-        daily_forecasts = {}
-
-        for item in data["list"]:
-            dt = datetime.fromtimestamp(item["dt"])
-            date_key = dt.date()
-
-            if date_key not in daily_forecasts:
-                daily_forecasts[date_key] = {
-                    "temps": [],
-                    "humidity": [],
-                    "wind_speed": [],
-                    "descriptions": [],
-                    "precipitation": [],
-                }
-
-            daily_forecasts[date_key]["temps"].append(item["main"]["temp"])
-            daily_forecasts[date_key]["humidity"].append(item["main"]["humidity"])
-            daily_forecasts[date_key]["wind_speed"].append(item.get("wind", {}).get("speed", 0))
-            daily_forecasts[date_key]["descriptions"].append(item["weather"][0]["description"])
-
-            # Calculate precipitation probability
-            pop = item.get("pop", 0) * 100  # Convert to percentage
-            daily_forecasts[date_key]["precipitation"].append(pop)
-
-        # Convert to ForecastData objects
-        forecasts = []
-        for date_key in sorted(daily_forecasts.keys())[:days]:
-            day_data = daily_forecasts[date_key]
-
-            # Get most common description
-            descriptions = day_data["descriptions"]
-            most_common_desc = max(set(descriptions), key=descriptions.count)
-
-            forecast = ForecastData(
-                date=datetime.combine(date_key, datetime.min.time()),
-                temperature_min=min(day_data["temps"]),
-                temperature_max=max(day_data["temps"]),
-                humidity=int(sum(day_data["humidity"]) / len(day_data["humidity"])),
-                wind_speed=sum(day_data["wind_speed"]) / len(day_data["wind_speed"]),
-                description=most_common_desc.title(),
-                precipitation_chance=int(max(day_data["precipitation"]))
-                if day_data["precipitation"]
-                else 0,
-            )
-            forecasts.append(forecast)
-
-        return forecasts
+        return parse_forecast(self._get(f"{self.BASE_URL}/forecast", params), days)
 
     def get_forecast_by_name(
-        self, city_name: str, country_code: str | None = None, days: int = 5
+        self, city_name: str, country_code: str | None = None, days: int = MAX_FORECAST_DAYS
     ) -> tuple[list[ForecastData], Location]:
-        """
-        Get weather forecast by city name.
-
-        Args:
-            city_name: Name of the city
-            country_code: Optional country code
-            days: Number of days to forecast
-
-        Returns:
-            Tuple of (List[ForecastData], Location)
-        """
         location = self.get_location_by_name(city_name, country_code)
-        if not location:
-            raise APIError(f"Location '{city_name}' not found.")
-
-        forecast_data = self.get_forecast(location, days)
-        return forecast_data, location
+        return self.get_forecast(location, days), location
 
     def validate_api_key(self) -> bool:
-        """
-        Validate the API key by making a simple request.
+        """Make one uncached request; False means the key was rejected.
 
-        Returns:
-            True if API key is valid, False otherwise
+        Network and service failures are raised rather than reported as an
+        invalid key.
         """
         try:
-            url = f"{self.BASE_URL}/weather"
-            params = {"q": "London", "units": "metric"}
-            self._make_request(url, params)
-            return True
-        except APIError:
+            self._get(f"{self.GEO_URL}/direct", {"q": "London", "limit": 1}, use_cache=False)
+        except AuthenticationError:
             return False
-
-    def get_api_usage_info(self) -> dict:
-        """
-        Get information about API usage and limits.
-        Note: This is limited in the free tier.
-
-        Returns:
-            Dictionary with usage information
-        """
-        # For the free tier, we can only estimate based on response headers
-        # This would be enhanced with a paid plan
-        return {
-            "plan": "Free",
-            "calls_per_minute": 60,
-            "calls_per_month": 1000000,
-            "note": "Exact usage tracking requires paid plan",
-        }
-
-
-def create_sample_config():
-    """Create a sample configuration file for API key setup."""
-    config = {
-        "api_key": "your_openweathermap_api_key_here",
-        "default_units": "metric",
-        "cache_duration_minutes": 10,
-    }
-
-    with open("config.json.sample", "w") as f:
-        json.dump(config, f, indent=2)
-
-    print("Sample configuration file created: config.json.sample")
-    print("Copy it to config.json and add your API key.")
-
-
-def create_sample_env():
-    """Create a sample .env file for API key setup."""
-    env_content = """# OpenWeatherMap API Configuration
-# Get your free API key from: https://openweathermap.org/api
-OPENWEATHER_API_KEY=your_api_key_here
-"""
-
-    with open(".env.sample", "w") as f:
-        f.write(env_content)
-
-    print("Sample environment file created: .env.sample")
-    print("Copy it to .env and add your API key.")
-
-
-if __name__ == "__main__":
-    # Test the API handler if run directly
-    try:
-        api = WeatherAPIHandler()
-        print("API key loaded successfully!")
-
-        if api.validate_api_key():
-            print("API key is valid!")
-
-            # Test current weather
-            weather, location = api.get_current_weather_by_name("London")
-            print(f"Current weather in {location}: {weather.temperature}°C, {weather.description}")
-
-        else:
-            print("API key is invalid!")
-
-    except APIError as e:
-        print(f"API Error: {e}")
-        print("\nTo set up your API key:")
-        print("1. Get a free API key from https://openweathermap.org/api")
-        print("2. Set environment variable: OPENWEATHER_API_KEY=your_key")
-        print("3. Or create a config.json file with your API key")
-
-        create_sample_config()
-        create_sample_env()
+        return True

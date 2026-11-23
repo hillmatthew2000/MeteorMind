@@ -14,8 +14,8 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from .api import APIError, WeatherAPIHandler
-from .config import ConfigManager
+from .api import APIError, WeatherAPIHandler, describe_error
+from .config import ConfigError, ConfigManager
 from .history import HistoryManager
 
 # Import our custom modules
@@ -27,7 +27,7 @@ from .units import (
     create_imperial_preferences,
     create_metric_preferences,
 )
-from .validation import ErrorHandler, InputValidator
+from .validation import InputValidator
 
 
 class WeatherGUI:
@@ -448,7 +448,7 @@ class WeatherGUI:
                 self.root.after(0, lambda: self.display_current_weather(weather_data, location))
 
             except APIError as e:
-                error_msg, suggestions = ErrorHandler.handle_api_error(e)
+                error_msg, suggestions = describe_error(e)
                 self.root.after(
                     0,
                     lambda: messagebox.showerror(
@@ -548,7 +548,7 @@ class WeatherGUI:
                 self.root.after(0, lambda: self.display_forecast(forecast_data, location))
 
             except APIError as e:
-                error_msg, suggestions = ErrorHandler.handle_api_error(e)
+                error_msg, suggestions = describe_error(e)
                 self.root.after(
                     0,
                     lambda: messagebox.showerror(
@@ -722,7 +722,7 @@ class WeatherGUI:
                     messagebox.showinfo("Info", f"{location} is already in favorites.")
 
             except APIError as e:
-                error_msg, suggestions = ErrorHandler.handle_api_error(e)
+                error_msg, suggestions = describe_error(e)
                 messagebox.showerror(
                     "API Error", f"{error_msg}\n\nSuggestions:\n" + "\n".join(suggestions)
                 )
@@ -1075,7 +1075,7 @@ class WeatherGUI:
                         0, lambda: messagebox.showerror("Error", "API key validation failed.")
                     )
             except APIError as e:
-                error_msg, suggestions = ErrorHandler.handle_api_error(e)
+                error_msg, suggestions = describe_error(e)
                 self.root.after(
                     0,
                     lambda: messagebox.showerror(
@@ -1155,16 +1155,15 @@ Your API key will be saved securely for future use.
                 )
                 return
 
-            # Save to config file
-            if self.config_manager.setup_config_file(api_key, overwrite=True):
-                messagebox.showinfo("Success", "API key saved successfully!")
-
-                # Reinitialize API handler
-                self._init_api_handler()
-                self.update_api_status()
-                dialog.destroy()
-            else:
-                messagebox.showerror("Error", "Failed to save API key.")
+            try:
+                path = self.config_manager.save_api_key(api_key)
+            except ConfigError as e:
+                messagebox.showerror("Error", str(e))
+                return
+            messagebox.showinfo("Success", f"API key saved to:\n{path}")
+            self._init_api_handler()
+            self.update_api_status()
+            dialog.destroy()
 
         ttk.Button(button_frame, text="Save", command=save_api_key).pack(side="left", padx=5)
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side="left", padx=5)
