@@ -12,8 +12,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from collections import defaultdict
 import json
-from data_structures import WeatherQuery, WeatherData, Location, ForecastData
-from data_manager import DataManager
+from .models import WeatherQuery, WeatherData, Location, ForecastData
+from .storage import DataManager
 
 
 class HistoryManager:
@@ -494,7 +494,7 @@ class HistoryManager:
 
 if __name__ == "__main__":
     # Test the history manager
-    from data_manager import DataManager
+    from .storage import DataManager
     
     dm = DataManager()
     hm = HistoryManager(dm)

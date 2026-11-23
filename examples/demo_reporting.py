@@ -10,9 +10,9 @@ from datetime import datetime, timedelta
 import random
 
 # Import our reporting modules
-from weather_reporting import WeatherReportGenerator, WeatherReport, ReportExporter
-from unit_converter import WeatherFormatter, create_metric_preferences, create_imperial_preferences
-from data_structures import WeatherData, Location, ForecastData, WeatherQuery
+from meteormind.reporting import WeatherReportGenerator, WeatherReport, ReportExporter
+from meteormind.units import WeatherFormatter, create_metric_preferences, create_imperial_preferences
+from meteormind.models import WeatherData, Location, ForecastData, WeatherQuery
 
 
 def create_sample_weather_data():

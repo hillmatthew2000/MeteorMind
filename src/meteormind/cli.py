@@ -16,14 +16,14 @@ from typing import Optional, List
 from datetime import datetime
 
 # Import our custom modules
-from data_structures import FavoriteLocationsLinkedList, Location, WeatherData
-from api_handler import WeatherAPIHandler, APIError
-from data_manager import DataManager
-from history_manager import HistoryManager
-from unit_converter import WeatherFormatter, UnitPreferences, create_metric_preferences, create_imperial_preferences
-from validation import InputValidator, safe_input, ErrorHandler
-from weather_reporting import WeatherReportGenerator, ReportExporter
-from config_manager import ConfigManager
+from .models import FavoriteLocationsLinkedList, Location, WeatherData
+from .api import WeatherAPIHandler, APIError
+from .storage import DataManager
+from .history import HistoryManager
+from .units import WeatherFormatter, UnitPreferences, create_metric_preferences, create_imperial_preferences
+from .validation import InputValidator, safe_input, ErrorHandler
+from .reporting import WeatherReportGenerator, ReportExporter
+from .config import ConfigManager
 
 
 class WeatherCLI:
@@ -661,7 +661,7 @@ class WeatherCLI:
     
     def change_temperature_units(self) -> None:
         """Change temperature units."""
-        from unit_converter import TemperatureUnit
+        from .units import TemperatureUnit
         
         print("\n🌡️  CHANGE TEMPERATURE UNITS")
         print("-" * 30)
@@ -719,7 +719,7 @@ class WeatherCLI:
         
         # Show data statistics
         print("\n" + "="*40)
-        from data_manager import print_data_statistics
+        from .storage import print_data_statistics
         print_data_statistics(self.data_manager)
         
         # Show configuration status
@@ -754,7 +754,7 @@ class WeatherCLI:
             else:
                 print("❌ Failed to create backup.")
         elif choice == 2:
-            from data_manager import print_data_statistics
+            from .storage import print_data_statistics
             print_data_statistics(self.data_manager)
         elif choice == 3:
             self.clear_all_data()
@@ -870,7 +870,7 @@ For more help, visit: https://openweathermap.org/api
     
     def configure_api_key(self) -> None:
         """Configure API key interactively."""
-        from config_manager import interactive_setup
+        from .config import interactive_setup
         interactive_setup()
         
         # Reinitialize API handler
@@ -1166,7 +1166,7 @@ For more help, visit: https://openweathermap.org/api
             location = self.api_handler.get_location_by_name(location_name, country)
         except:
             # Fallback location if API fails
-            from data_structures import Location
+            from .models import Location
             location = Location(location_name, country or "Unknown", 0, 0)
         
         # Generate and display report
@@ -1394,7 +1394,7 @@ For more help, visit: https://openweathermap.org/api
         filename = f"{base_filename}_{timestamp}.{format_type}"
         
         try:
-            from weather_reporting import ReportExporter
+            from .reporting import ReportExporter
             if ReportExporter.export_to_file(report, filename, format_type):
                 print(f"✅ Report exported to: {filename}")
             else:

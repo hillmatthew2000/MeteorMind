@@ -11,7 +11,7 @@ import json
 import os
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-from data_structures import WeatherData, Location, ForecastData
+from .models import WeatherData, Location, ForecastData
 
 
 class APIError(Exception):

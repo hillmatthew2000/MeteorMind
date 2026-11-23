@@ -16,16 +16,16 @@ def test_imports():
     print("🧪 Testing module imports...")
     
     modules_to_test = [
-        'data_structures',
-        'api_handler', 
-        'data_manager',
-        'history_manager',
-        'unit_converter',
-        'validation',
-        'config_manager',
-        'weather_cli',
-        'weather_gui',
-        'weather_reporting'
+        'meteormind.models',
+        'meteormind.api',
+        'meteormind.storage',
+        'meteormind.history',
+        'meteormind.units',
+        'meteormind.validation',
+        'meteormind.config',
+        'meteormind.cli',
+        'meteormind.gui',
+        'meteormind.reporting'
     ]
     
     failed_imports = []
@@ -53,7 +53,7 @@ def test_data_structures():
     print("\n🧪 Testing data structures...")
     
     try:
-        from data_structures import Location, WeatherData, FavoriteLocationsLinkedList
+        from meteormind.models import Location, WeatherData, FavoriteLocationsLinkedList
         
         # Test Location
         location = Location("London", "GB", 51.5074, -0.1278)
@@ -105,7 +105,7 @@ def test_unit_converter():
     print("\n🧪 Testing unit conversion...")
     
     try:
-        from unit_converter import WeatherFormatter, create_metric_preferences, create_imperial_preferences
+        from meteormind.units import WeatherFormatter, create_metric_preferences, create_imperial_preferences
         
         # Test metric preferences
         metric_prefs = create_metric_preferences()
@@ -146,7 +146,7 @@ def test_validation():
     print("\n🧪 Testing input validation...")
     
     try:
-        from validation import InputValidator
+        from meteormind.validation import InputValidator
         
         # Test city name validation
         result = InputValidator.validate_city_name("London")
@@ -179,7 +179,7 @@ def test_config_manager():
     print("\n🧪 Testing configuration management...")
     
     try:
-        from config_manager import ConfigManager
+        from meteormind.config import ConfigManager
         
         config_manager = ConfigManager()
         
@@ -210,8 +210,8 @@ def test_weather_reporting():
     print("\n🧪 Testing weather reporting...")
     
     try:
-        from weather_reporting import WeatherReportGenerator, WeatherReport
-        from unit_converter import create_metric_preferences, WeatherFormatter
+        from meteormind.reporting import WeatherReportGenerator, WeatherReport
+        from meteormind.units import create_metric_preferences, WeatherFormatter
         
         # Create formatter
         preferences = create_metric_preferences()

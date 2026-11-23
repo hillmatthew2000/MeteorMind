@@ -17,13 +17,13 @@ from typing import Optional, List
 from datetime import datetime
 
 # Import our custom modules
-from data_structures import FavoriteLocationsLinkedList, Location, WeatherData
-from api_handler import WeatherAPIHandler, APIError
-from data_manager import DataManager
-from history_manager import HistoryManager
-from unit_converter import WeatherFormatter, UnitPreferences, create_metric_preferences, create_imperial_preferences
-from validation import InputValidator, ErrorHandler
-from config_manager import ConfigManager
+from .models import FavoriteLocationsLinkedList, Location, WeatherData
+from .api import WeatherAPIHandler, APIError
+from .storage import DataManager
+from .history import HistoryManager
+from .units import WeatherFormatter, UnitPreferences, create_metric_preferences, create_imperial_preferences
+from .validation import InputValidator, ErrorHandler
+from .config import ConfigManager
 
 
 class WeatherGUI:
@@ -740,7 +740,7 @@ class WeatherGUI:
         # Generate history report
         queries = self.history_manager.get_recent_queries(100)
         if queries:
-            from weather_reporting import WeatherReportGenerator
+            from .reporting import WeatherReportGenerator
             report_gen = WeatherReportGenerator(self.formatter)
             history_report = report_gen.generate_query_history_report(queries, 100)
             history_text_widget.insert(1.0, history_report.to_table_string())
@@ -825,7 +825,7 @@ class WeatherGUI:
                         messagebox.showwarning("Export Error", "No report data available to export.")
                         return
                     
-                    from weather_reporting import ReportExporter
+                    from .reporting import ReportExporter
                     if ReportExporter.export_to_file(report, filename):
                         messagebox.showinfo("Export Success", f"Report exported to:\n{filename}")
                     else:
@@ -863,7 +863,7 @@ class WeatherGUI:
     
     def update_unit_preferences(self, event=None):
         """Update unit preferences when combobox selection changes."""
-        from unit_converter import TemperatureUnit, WindSpeedUnit, PressureUnit
+        from .units import TemperatureUnit, WindSpeedUnit, PressureUnit
         
         try:
             # Update preferences
@@ -1060,7 +1060,7 @@ Your API key will be saved securely for future use.
         stats_text.pack(fill='both', expand=True, padx=10, pady=10)
         
         # Format statistics
-        from data_manager import format_file_size
+        from .storage import format_file_size
         
         stats_content = f"📊 DATA STATISTICS\n"
         stats_content += "=" * 40 + "\n\n"

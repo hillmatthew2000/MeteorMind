@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meteormind"
+description = "Current weather and forecasts from OpenWeatherMap, with a command-line and a desktop interface."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = ["requests>=2.31,<3"]
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Environment :: X11 Applications :: Tk",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.2.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.17.6",
+    "mypy==2.4.1",
+    "types-requests==2.33.0.20261030",
+]
+
+[project.scripts]
+meteormind = "meteormind.__main__:main"
+
+[project.gui-scripts]
+meteormind-gui = "meteormind.gui:main"
+
+[project.urls]
+Homepage = "https://github.com/hillmatthew2000/MeteorMind"
+
+[tool.setuptools.dynamic]
+version = { attr = "meteormind.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"

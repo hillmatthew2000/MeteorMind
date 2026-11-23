@@ -10,8 +10,8 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 import json
 
-from data_structures import WeatherData, Location, ForecastData, WeatherQuery
-from unit_converter import WeatherFormatter, UnitPreferences
+from .models import WeatherData, Location, ForecastData, WeatherQuery
+from .units import WeatherFormatter, UnitPreferences
 
 
 @dataclass
@@ -571,7 +571,7 @@ def create_sample_reports(formatter: WeatherFormatter) -> Dict[str, WeatherRepor
     generator = WeatherReportGenerator(formatter)
     
     # Sample data (normally would come from actual API calls)
-    from data_structures import Location, WeatherData
+    from .models import Location, WeatherData
     from datetime import datetime
     
     # Sample locations and weather data
@@ -634,7 +634,7 @@ def create_sample_reports(formatter: WeatherFormatter) -> Dict[str, WeatherRepor
 
 if __name__ == "__main__":
     """Demo the reporting functionality."""
-    from unit_converter import create_metric_preferences, WeatherFormatter
+    from .units import create_metric_preferences, WeatherFormatter
     
     # Create formatter
     preferences = create_metric_preferences()
