@@ -39,24 +39,6 @@ from .units import (
 
 E = TypeVar("E", TemperatureUnit, WindSpeedUnit, PressureUnit, DistanceUnit)
 
-UNIT_NAMES: dict[object, str] = {
-    TemperatureUnit.CELSIUS: "Celsius",
-    TemperatureUnit.FAHRENHEIT: "Fahrenheit",
-    TemperatureUnit.KELVIN: "Kelvin",
-    WindSpeedUnit.METERS_PER_SECOND: "metres per second",
-    WindSpeedUnit.KILOMETERS_PER_HOUR: "kilometres per hour",
-    WindSpeedUnit.MILES_PER_HOUR: "miles per hour",
-    WindSpeedUnit.KNOTS: "knots",
-    PressureUnit.HECTOPASCAL: "hectopascals",
-    PressureUnit.MILLIBARS: "millibars",
-    PressureUnit.INCHES_OF_MERCURY: "inches of mercury",
-    PressureUnit.ATMOSPHERES: "atmospheres",
-    DistanceUnit.KILOMETERS: "kilometres",
-    DistanceUnit.MILES: "miles",
-    DistanceUnit.METERS: "metres",
-    DistanceUnit.FEET: "feet",
-}
-
 HELP_TEXT = """\
 MeteorMind shows current weather and five-day forecasts from OpenWeatherMap.
 
@@ -402,7 +384,7 @@ class Menu:
 
     def choose_unit(self, title: str, current: E) -> E:
         members = list(type(current))
-        options = [(m.value, f"{UNIT_NAMES[m]} ({m.symbol})") for m in members]
+        options = [(m.value, f"{m.label} ({m.symbol})") for m in members]
         choice = self.choose(title, options)
         return type(current)(choice) if choice else current
 
