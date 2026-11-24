@@ -1,1567 +1,457 @@
-"""
-Command Line Interface (CLI) for the weather application.
+"""The ``meteormind`` command: one-shot subcommands and an interactive menu.
 
-This module provides a clear, numbered menu-driven interface that allows users to:
-- Fetch current weather for any location
-- Get weather forecasts
-- Manage favorite locations
-- View query history
-- Change unit preferences
-- Configure API settings
+Exit codes: 0 success, 1 the request failed (network, API, storage), 2 the
+command line or input was invalid, 130 interrupted with Ctrl+C.
 """
 
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import logging
 import sys
-from datetime import datetime
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TextIO
 
-from .api import APIError, WeatherAPIHandler, describe_error
-from .config import ConfigError, ConfigManager
-from .history import HistoryManager
-
-# Import our custom modules
-from .models import FavoriteLocationsLinkedList, Location, WeatherData
-from .reporting import WeatherReportGenerator
-from .storage import DataManager
-from .units import (
-    UnitPreferences,
-    WeatherFormatter,
-    create_imperial_preferences,
-    create_metric_preferences,
+from . import __version__
+from .api import MAX_FORECAST_DAYS, APIError, LocationNotFoundError
+from .config import ConfigError
+from .console import (
+    configure_stream,
+    describe_error,
+    describe_forecast,
+    describe_weather,
+    favorites_table,
+    history_table,
 )
-from .validation import InputValidator, ValidationResult, safe_input
+from .models import Location
+from .reporting import REPORT_FORMATS, ReportError, render_report, write_report
+from .service import REPORT_KINDS, InputError, WeatherService
+from .storage import StorageError
+from .units import WeatherFormatter, create_imperial_preferences, create_metric_preferences
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+EXIT_INTERRUPTED = 130
 
 
-class WeatherCLI:
+@dataclass
+class App:
+    """What a command handler needs: the service and where to write."""
+
+    service: WeatherService
+    out: TextIO = field(default_factory=lambda: sys.stdout)
+    err: TextIO = field(default_factory=lambda: sys.stderr)
+    inp: TextIO = field(default_factory=lambda: sys.stdin)
+    # Whether questions can be asked; prompts go to ``err`` so piped output stays clean.
+    interactive: bool = False
+
+    def print(self, text: str = "") -> None:
+        print(text, file=self.out)
+
+    def warn(self, text: str) -> None:
+        print(text, file=self.err)
+
+    @property
+    def fmt(self) -> WeatherFormatter:
+        return self.service.formatter
+
+
+Handler = Callable[[App, argparse.Namespace], int]
+
+
+def _place(words: Sequence[str]) -> str:
+    return " ".join(words).strip()
+
+
+def resolve_place(app: App, words: Sequence[str], pick: int | None = None) -> Location:
+    """The place the user meant when a name matches several.
+
+    ``pick`` chooses by position. Otherwise an interactive session asks, and
+    a script gets the best match with the alternatives listed on stderr.
     """
-    Command Line Interface for the weather application.
-
-    Features:
-    - Numbered menu system for easy navigation
-    - Input validation and error handling
-    - Unit preference management
-    - Favorite location management
-    - Query history tracking
-    - Comprehensive help system
-    """
-
-    def __init__(self):
-        """Initialize the CLI application."""
-        self.running = True
-        self.data_manager = DataManager()
-        self.history_manager = HistoryManager(self.data_manager)
-        self.config_manager = ConfigManager()
-
-        # Load user preferences
-        user_prefs = self.data_manager.get_user_preferences()
-        unit_prefs_data = user_prefs.get("units", {})
-
-        # Create unit preferences
-        if isinstance(unit_prefs_data, str):
-            # Handle legacy string format
-            if unit_prefs_data == "imperial":
-                self.unit_preferences = create_imperial_preferences()
-            else:
-                self.unit_preferences = create_metric_preferences()
-        else:
-            # Handle new dict format
-            try:
-                self.unit_preferences = UnitPreferences.from_dict(unit_prefs_data)
-            except (KeyError, ValueError):
-                self.unit_preferences = create_metric_preferences()
-
-        self.formatter = WeatherFormatter(self.unit_preferences)
-        self.report_generator = WeatherReportGenerator(self.formatter)
-
-        # Load favorite locations
-        self.favorite_locations = self.data_manager.load_favorite_locations()
-
-        # Initialize API handler
-        self.api_handler = None
-        self._init_api_handler()
-
-    def _init_api_handler(self) -> bool:
-        """
-        Initialize the API handler with proper error handling.
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            self.api_handler = WeatherAPIHandler()
-            return True
-        except APIError as e:
-            print(f"⚠️  API Configuration Issue: {e}")
-            print("\nTo fix this issue:")
-            print("1. Get a free API key from https://openweathermap.org/api")
-            print("2. Run the setup command to configure your API key")
-            print("3. Or set the OPENWEATHER_API_KEY environment variable")
-            return False
-
-    def display_main_menu(self) -> None:
-        """Display the main menu options."""
-        print("\n" + "=" * 60)
-        print("🌤️  WEATHER APPLICATION - MAIN MENU")
-        print("=" * 60)
-        print("1. 🌡️  Get Current Weather")
-        print("2. 📅 Get Weather Forecast")
-        print("3. ⭐ Manage Favorite Locations")
-        print("4. 📊 View Query History")
-        print("5. 📈 Weather Reports & Analysis")
-        print("6. ⚙️  Settings & Preferences")
-        print("7. 🔧 Setup & Configuration")
-        print("8. ❓ Help & Information")
-        print("9. 🚪 Exit")
-        print("=" * 60)
-
-    def display_favorites_menu(self) -> None:
-        """Display the favorites management menu."""
-        print("\n" + "=" * 50)
-        print("⭐ FAVORITE LOCATIONS MENU")
-        print("=" * 50)
-        print("1. 📋 View All Favorites")
-        print("2. ➕ Add New Favorite")
-        print("3. ❌ Remove Favorite")
-        print("4. 🌡️  Get Weather for Favorite")
-        print("5. 🔄 Move Favorite to Top")
-        print("6. ⬅️  Back to Main Menu")
-        print("=" * 50)
-
-    def display_settings_menu(self) -> None:
-        """Display the settings and preferences menu."""
-        print("\n" + "=" * 50)
-        print("⚙️  SETTINGS & PREFERENCES")
-        print("=" * 50)
-        print("1. 🌡️  Change Temperature Units")
-        print("2. 💨 Change Wind Speed Units")
-        print("3. 🏋️  Change Pressure Units")
-        print("4. 📏 Change Distance Units")
-        print("5. 📦 Quick Unit Presets")
-        print("6. 📊 View Current Settings")
-        print("7. 🗑️  Clear Cache")
-        print("8. 🗃️  Data Management")
-        print("9. ⬅️  Back to Main Menu")
-        print("=" * 50)
-
-    def display_reports_menu(self) -> None:
-        """Display the weather reports and analysis menu."""
-        print("\n" + "=" * 50)
-        print("📈 WEATHER REPORTS & ANALYSIS")
-        print("=" * 50)
-        print("1. 📊 Current Weather Comparison")
-        print("2. 📅 Forecast Analysis Report")
-        print("3. 📍 Location Statistics")
-        print("4. 📈 Temperature Trends")
-        print("5. 📋 Generate Custom Report")
-        print("6. 💾 Export Report Data")
-        print("7. 📊 Query Statistics")
-        print("8. ⬅️  Back to Main Menu")
-        print("=" * 50)
-
-    def get_menu_choice(self, max_option: int) -> int | None:
-        """
-        Get user menu choice with validation.
-
-        Args:
-            max_option: Maximum valid option number
-
-        Returns:
-            Selected option number or None if invalid
-        """
-
-        def validate_choice(choice_str: str):
-            return InputValidator.validate_numeric_input(
-                choice_str,
-                min_value=1,
-                max_value=max_option,
-                allow_negative=False,
-                decimal_places=0,
+    query = _place(words)
+    matches = app.service.search(query)
+    if not matches:
+        raise LocationNotFoundError(f"No place called '{query}' was found.")
+    numbered = [f"{n}. {loc.display_name}" for n, loc in enumerate(matches, 1)]
+    if pick is not None:
+        if not 1 <= pick <= len(matches):
+            raise InputError(
+                f"'{query}' matches {len(matches)} place(s); --pick {pick} is not one.", numbered
             )
-
-        choice = safe_input(f"\nEnter your choice (1-{max_option}): ", validate_choice)
-        return int(choice) if choice is not None else None
-
-    def get_current_weather(self) -> None:
-        """Get current weather for a location."""
-        print("\n🌡️  GET CURRENT WEATHER")
-        print("-" * 30)
-
-        if not self.api_handler:
-            print("❌ API not configured. Please run setup first.")
-            return
-
-        # Get city name
-        city = safe_input("Enter city name: ", InputValidator.validate_city_name)
-        if not city:
-            return
-
-        # Get optional country code
-        country = safe_input(
-            "Enter country code (optional, e.g., 'US', 'GB'): ",
-            InputValidator.validate_country_code,
+        return matches[pick - 1]
+    if len(matches) == 1:
+        return matches[0]
+    if app.interactive:
+        app.warn(f"Several places match '{query}':")
+    else:
+        app.warn(
+            f"Note: '{query}' matches {len(matches)} places; using the first. Choose with --pick N:"
         )
+    for line in numbered:
+        app.warn(f"  {line}")
+    return _ask_which(app, matches) if app.interactive else matches[0]
 
-        try:
-            print(f"🔍 Fetching weather for {city}" + (f", {country}" if country else "") + "...")
 
-            # Check cache first
-            if country:
-                temp_location = Location(city, country, 0, 0)
-                cached_weather = self.history_manager.get_cached_weather(temp_location)
-                if cached_weather:
-                    print("📦 Using cached data...")
-                    self.display_weather_data(cached_weather, temp_location)
-                    return
+def _ask_which(app: App, matches: Sequence[Location]) -> Location:
+    while True:
+        print(f"Which one? [1-{len(matches)}, Enter for 1]: ", end="", file=app.err, flush=True)
+        answer = app.inp.readline()
+        if not answer:
+            raise InputError("No place was chosen.")
+        answer = answer.strip() or "1"
+        if answer.isdigit() and 1 <= int(answer) <= len(matches):
+            return matches[int(answer) - 1]
+        app.warn(f"Enter a number from 1 to {len(matches)}.")
 
-            # Fetch from API
-            weather_data, location = self.api_handler.get_current_weather_by_name(city, country)
 
-            # Cache the data
-            self.history_manager.cache_weather_data(location, weather_data)
+def _dump_json(app: App, data: object) -> None:
+    app.print(json.dumps(data, indent=2, ensure_ascii=False))
 
-            # Add to query history
-            self.history_manager.add_query(location, weather_data, "current")
 
-            # Display the weather
-            self.display_weather_data(weather_data, location)
+# Weather ---------------------------------------------------------------------
 
-            # Ask if user wants to add to favorites
-            if not self.favorite_locations.find_location(location.city, location.country):
-                add_favorite = input(f"\n💾 Add {location} to favorites? (y/N): ").lower().strip()
-                if add_favorite in ["y", "yes"]:
-                    if self.favorite_locations.add_location(location):
-                        self.data_manager.save_favorite_locations(self.favorite_locations)
-                        print(f"✅ Added {location} to favorites!")
-                    else:
-                        print(f"ℹ️  {location} is already in favorites.")
 
-        except APIError as e:
-            error_msg, suggestions = describe_error(e)
-            print(f"❌ {error_msg}")
-            for suggestion in suggestions:
-                print(f"   💡 {suggestion}")
-        except Exception as e:
-            print(f"❌ Unexpected error: {e}")
+def cmd_current(app: App, args: argparse.Namespace) -> int:
+    location = resolve_place(app, args.place, args.pick)
+    weather = app.service.current_weather(location)
+    if args.json:
+        _dump_json(app, {"location": location.to_dict(), "weather": weather.to_dict()})
+    else:
+        app.print(describe_weather(weather, location, app.fmt))
+    return EXIT_OK
 
-    def display_weather_data(self, weather_data: WeatherData, location: Location) -> None:
-        """
-        Display weather data in a formatted way.
 
-        Args:
-            weather_data: Weather data to display
-            location: Location information
-        """
-        print(f"\n🌤️  CURRENT WEATHER FOR {location}")
-        print("=" * 50)
-        print(f"🌡️  Temperature: {self.formatter.format_temperature(weather_data.temperature)}")
-        print(f"🌡️  Feels like: {self.formatter.format_temperature(weather_data.feels_like)}")
-        print(f"💧 Humidity: {self.formatter.format_humidity(weather_data.humidity)}")
-        print(f"🏋️  Pressure: {self.formatter.format_pressure(weather_data.pressure)}")
-        print(f"💨 Wind: {self.formatter.format_wind_speed(weather_data.wind_speed)}")
-
-        if weather_data.wind_direction is not None:
-            print(
-                f"🧭 Wind Direction: {self.formatter.format_wind_direction(weather_data.wind_direction)}"
-            )
-
-        print(f"☁️  Conditions: {weather_data.description}")
-        print(f"🕐 Updated: {weather_data.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 50)
-
-    def get_weather_forecast(self) -> None:
-        """Get weather forecast for a location."""
-        print("\n📅 GET WEATHER FORECAST")
-        print("-" * 30)
-
-        if not self.api_handler:
-            print("❌ API not configured. Please run setup first.")
-            return
-
-        # Get city name
-        city = safe_input("Enter city name: ", InputValidator.validate_city_name)
-        if not city:
-            return
-
-        # Get optional country code
-        country = safe_input(
-            "Enter country code (optional): ", InputValidator.validate_country_code
+def cmd_forecast(app: App, args: argparse.Namespace) -> int:
+    location = resolve_place(app, args.place, args.pick)
+    forecast = app.service.forecast(location, args.days)
+    if args.json:
+        _dump_json(
+            app, {"location": location.to_dict(), "forecast": [d.to_dict() for d in forecast]}
         )
-
-        # Get number of days
-        def validate_days(days_str):
-            return InputValidator.validate_numeric_input(
-                days_str, min_value=1, max_value=5, allow_negative=False, decimal_places=0
-            )
-
-        days = safe_input("Number of days (1-5, default 5): ", validate_days)
-        if days is None:
-            days = 5
-        days = int(days)
-
-        try:
-            print(
-                f"🔍 Fetching {days}-day forecast for {city}"
-                + (f", {country}" if country else "")
-                + "..."
-            )
-
-            forecast_data, location = self.api_handler.get_forecast_by_name(city, country, days)
-
-            # Cache the data
-            self.history_manager.cache_forecast_data(location, forecast_data)
-
-            # Add to query history
-            self.history_manager.add_query(location, None, "forecast")
-
-            # Display the forecast
-            self.display_forecast_data(forecast_data, location)
-
-        except APIError as e:
-            error_msg, suggestions = describe_error(e)
-            print(f"❌ {error_msg}")
-            for suggestion in suggestions:
-                print(f"   💡 {suggestion}")
-        except Exception as e:
-            print(f"❌ Unexpected error: {e}")
-
-    def display_forecast_data(self, forecast_data: list, location: Location) -> None:
-        """
-        Display forecast data in a formatted table.
-
-        Args:
-            forecast_data: List of forecast data
-            location: Location information
-        """
-        print(f"\n📅 {len(forecast_data)}-DAY FORECAST FOR {location}")
-        print("=" * 80)
-        print(
-            f"{'Date':<12} {'High':<8} {'Low':<8} {'Humidity':<10} {'Wind':<12} {'Conditions':<20}"
-        )
-        print("-" * 80)
-
-        for forecast in forecast_data:
-            date_str = forecast.date.strftime("%m/%d")
-            high_temp = self.formatter.format_temperature(forecast.temperature_max, show_unit=False)
-            low_temp = self.formatter.format_temperature(forecast.temperature_min, show_unit=False)
-            humidity = self.formatter.format_humidity(forecast.humidity)
-            wind = self.formatter.format_wind_speed(forecast.wind_speed, show_unit=False)
-            conditions = (
-                forecast.description[:18] + "..."
-                if len(forecast.description) > 18
-                else forecast.description
-            )
-
-            print(
-                f"{date_str:<12} {high_temp:<8} {low_temp:<8} {humidity:<10} {wind:<12} {conditions:<20}"
-            )
-
-            if forecast.precipitation_chance > 0:
-                print(f"{'':12} 🌧️  {forecast.precipitation_chance}% chance of precipitation")
-
-        print("=" * 80)
-
-        # Show units legend
-        temp_unit = self.formatter.temperature_symbol
-        wind_unit = self.formatter.format_wind_speed(0, show_unit=True).split()[-1]
-        print(f"💡 Temperature in {temp_unit}, Wind speed in {wind_unit}")
-
-    def manage_favorites(self) -> None:
-        """Manage favorite locations submenu."""
-        while True:
-            self.display_favorites_menu()
-            choice = self.get_menu_choice(6)
-
-            if choice == 1:
-                self.view_favorites()
-            elif choice == 2:
-                self.add_favorite()
-            elif choice == 3:
-                self.remove_favorite()
-            elif choice == 4:
-                self.get_weather_for_favorite()
-            elif choice == 5:
-                self.move_favorite_to_top()
-            elif choice == 6:
-                break
-            else:
-                print("❌ Invalid choice. Please try again.")
-
-    def view_favorites(self) -> None:
-        """Display all favorite locations."""
-        locations = self.favorite_locations.get_all_locations()
-
-        if not locations:
-            print("\n📭 No favorite locations saved.")
-            print("💡 Add some favorites to quickly access weather for your preferred cities!")
-            return
-
-        print(f"\n⭐ YOUR FAVORITE LOCATIONS ({len(locations)} total)")
-        print("=" * 60)
-
-        for i, location in enumerate(locations, 1):
-            added_date = location.added_date.strftime("%Y-%m-%d")
-            print(f"{i:2d}. {location.city:<20} {location.country:<5} (Added: {added_date})")
-            print(f"    📍 {location.latitude:.2f}, {location.longitude:.2f}")
-
-        print("=" * 60)
-
-    def add_favorite(self) -> None:
-        """Add a new favorite location."""
-        print("\n➕ ADD NEW FAVORITE LOCATION")
-        print("-" * 30)
-
-        if not self.api_handler:
-            print("❌ API not configured. Cannot verify location.")
-            return
-
-        # Get city name
-        city = safe_input("Enter city name: ", InputValidator.validate_city_name)
-        if not city:
-            return
-
-        # Get optional country code
-        country = safe_input(
-            "Enter country code (optional, recommended): ", InputValidator.validate_country_code
-        )
-
-        try:
-            print(f"🔍 Verifying location: {city}" + (f", {country}" if country else "") + "...")
-
-            # Verify location exists by fetching its coordinates
-            location = self.api_handler.get_location_by_name(city, country)
-            if not location:
-                print(f"❌ Could not find location: {city}")
-                return
-
-            # Try to add to favorites
-            if self.favorite_locations.add_location(location):
-                self.data_manager.save_favorite_locations(self.favorite_locations)
-                print(f"✅ Added {location} to favorites!")
-                print(f"📍 Coordinates: {location.latitude:.2f}, {location.longitude:.2f}")
-            else:
-                print(f"ℹ️  {location} is already in your favorites.")
-
-        except APIError as e:
-            error_msg, suggestions = describe_error(e)
-            print(f"❌ {error_msg}")
-            for suggestion in suggestions:
-                print(f"   💡 {suggestion}")
-        except Exception as e:
-            print(f"❌ Unexpected error: {e}")
-
-    def remove_favorite(self) -> None:
-        """Remove a favorite location."""
-        locations = self.favorite_locations.get_all_locations()
-
-        if not locations:
-            print("\n📭 No favorite locations to remove.")
-            return
-
-        print("\n❌ REMOVE FAVORITE LOCATION")
-        print("-" * 30)
-
-        # Display numbered list
-        for i, location in enumerate(locations, 1):
-            print(f"{i}. {location}")
-
-        def validate_selection(selection_str):
-            return InputValidator.validate_numeric_input(
-                selection_str,
-                min_value=1,
-                max_value=len(locations),
-                allow_negative=False,
-                decimal_places=0,
-            )
-
-        selection = safe_input(f"Enter number to remove (1-{len(locations)}): ", validate_selection)
-        if selection is None:
-            return
-
-        selection = int(selection) - 1
-        location_to_remove = locations[selection]
-
-        # Confirm removal
-        confirm = (
-            input(f"❓ Really remove '{location_to_remove}' from favorites? (y/N): ")
-            .lower()
-            .strip()
-        )
-        if confirm in ["y", "yes"]:
-            if self.favorite_locations.remove_location(
-                location_to_remove.city, location_to_remove.country
-            ):
-                self.data_manager.save_favorite_locations(self.favorite_locations)
-                print(f"✅ Removed {location_to_remove} from favorites.")
-            else:
-                print(f"❌ Could not remove {location_to_remove}.")
-        else:
-            print("❌ Removal cancelled.")
-
-    def get_weather_for_favorite(self) -> None:
-        """Get weather for a favorite location."""
-        locations = self.favorite_locations.get_all_locations()
-
-        if not locations:
-            print("\n📭 No favorite locations available.")
-            return
-
-        if not self.api_handler:
-            print("❌ API not configured.")
-            return
-
-        print("\n🌡️  GET WEATHER FOR FAVORITE")
-        print("-" * 30)
-
-        # Display numbered list
-        for i, location in enumerate(locations, 1):
-            print(f"{i}. {location}")
-
-        def validate_selection(selection_str):
-            return InputValidator.validate_numeric_input(
-                selection_str,
-                min_value=1,
-                max_value=len(locations),
-                allow_negative=False,
-                decimal_places=0,
-            )
-
-        selection = safe_input(f"Select location (1-{len(locations)}): ", validate_selection)
-        if selection is None:
-            return
-
-        selection = int(selection) - 1
-        location = locations[selection]
-
-        try:
-            print(f"🔍 Fetching weather for {location}...")
-
-            # Check cache first
-            cached_weather = self.history_manager.get_cached_weather(location)
-            if cached_weather:
-                print("📦 Using cached data...")
-                self.display_weather_data(cached_weather, location)
-
-                # Move to front of favorites (most recently accessed)
-                self.favorite_locations.move_to_front(location.city, location.country)
-                self.data_manager.save_favorite_locations(self.favorite_locations)
-                return
-
-            # Fetch from API
-            weather_data = self.api_handler.get_current_weather(location)
-
-            # Cache and track
-            self.history_manager.cache_weather_data(location, weather_data)
-            self.history_manager.add_query(location, weather_data, "current")
-
-            # Display weather
-            self.display_weather_data(weather_data, location)
-
-            # Move to front of favorites
-            self.favorite_locations.move_to_front(location.city, location.country)
-            self.data_manager.save_favorite_locations(self.favorite_locations)
-
-        except APIError as e:
-            error_msg, suggestions = describe_error(e)
-            print(f"❌ {error_msg}")
-            for suggestion in suggestions:
-                print(f"   💡 {suggestion}")
-        except Exception as e:
-            print(f"❌ Unexpected error: {e}")
-
-    def move_favorite_to_top(self) -> None:
-        """Move a favorite location to the top of the list."""
-        locations = self.favorite_locations.get_all_locations()
-
-        if len(locations) <= 1:
-            print("\n📭 Need at least 2 favorites to reorder.")
-            return
-
-        print("\n🔄 MOVE FAVORITE TO TOP")
-        print("-" * 30)
-
-        # Display numbered list (skip first item since it's already at top)
-        for i, location in enumerate(locations, 1):
-            print(f"{i}. {location}")
-
-        def validate_selection(selection_str):
-            return InputValidator.validate_numeric_input(
-                selection_str,
-                min_value=2,
-                max_value=len(locations),
-                allow_negative=False,
-                decimal_places=0,
-            )
-
-        selection = safe_input(
-            f"Select location to move to top (2-{len(locations)}): ", validate_selection
-        )
-        if selection is None:
-            return
-
-        selection = int(selection) - 1
-        location = locations[selection]
-
-        if self.favorite_locations.move_to_front(location.city, location.country):
-            self.data_manager.save_favorite_locations(self.favorite_locations)
-            print(f"✅ Moved {location} to top of favorites.")
-        else:
-            print(f"❌ Could not move {location}.")
-
-    def view_query_history(self) -> None:
-        """Display query history and statistics."""
-        print("\n📊 QUERY HISTORY & STATISTICS")
-        print("=" * 50)
-
-        # Print recent queries
-        self.history_manager.print_recent_queries(15)
-
-        # Print statistics
-        self.history_manager.print_statistics()
-
-        # Options for history management
-        print("\nHistory Options:")
-        print("1. Export history to file")
-        print("2. Clear history")
-        print("3. Search history")
-        print("4. Back to main menu")
-
-        choice = self.get_menu_choice(4)
-        if choice == 1:
-            self.export_history()
-        elif choice == 2:
-            self.clear_history()
-        elif choice == 3:
-            self.search_history()
-
-    def export_history(self) -> None:
-        """Export query history to a file."""
-        filename = f"weather_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        filepath = safe_input(f"Enter filename (default: {filename}): ")
-
-        if not filepath:
-            filepath = filename
-
-        if self.history_manager.export_history(filepath):
-            print(f"✅ History exported to: {filepath}")
-        else:
-            print("❌ Failed to export history.")
-
-    def clear_history(self) -> None:
-        """Clear query history with confirmation."""
-        confirm = (
-            input("❓ Really clear all query history? This cannot be undone. (y/N): ")
-            .lower()
-            .strip()
-        )
-        if confirm in ["y", "yes"]:
-            if self.history_manager.clear_history():
-                print("✅ Query history cleared.")
-            else:
-                print("❌ Failed to clear history.")
-        else:
-            print("❌ History clearing cancelled.")
-
-    def search_history(self) -> None:
-        """Search query history."""
-        search_term = safe_input("Enter city or country to search for: ")
-        if not search_term:
-            return
-
-        results = self.history_manager.search_queries(search_term, limit=20)
-
-        if not results:
-            print(f"❌ No queries found for '{search_term}'.")
-            return
-
-        print(f"\n🔍 SEARCH RESULTS FOR '{search_term}' ({len(results)} found)")
-        print("-" * 60)
-
-        for i, query in enumerate(results, 1):
-            time_str = query.query_time.strftime("%Y-%m-%d %H:%M")
-            location_str = f"{query.location.city}, {query.location.country}"
-            print(f"{i:2d}. {time_str} | {location_str} | {query.query_type}")
-
-    def manage_settings(self) -> None:
-        """Manage settings and preferences submenu."""
-        while True:
-            self.display_settings_menu()
-            choice = self.get_menu_choice(9)
-
-            if choice == 1:
-                self.change_temperature_units()
-            elif choice == 2:
-                self.change_wind_speed_units()
-            elif choice == 3:
-                self.change_pressure_units()
-            elif choice == 4:
-                self.change_distance_units()
-            elif choice == 5:
-                self.quick_unit_presets()
-            elif choice == 6:
-                self.view_current_settings()
-            elif choice == 7:
-                self.clear_cache()
-            elif choice == 8:
-                self.data_management()
-            elif choice == 9:
-                break
-            else:
-                print("❌ Invalid choice. Please try again.")
-
-    def change_temperature_units(self) -> None:
-        """Change temperature units."""
-        from .units import TemperatureUnit
-
-        print("\n🌡️  CHANGE TEMPERATURE UNITS")
-        print("-" * 30)
-        print("1. Celsius (°C)")
-        print("2. Fahrenheit (°F)")
-        print("3. Kelvin (K)")
-
-        choice = self.get_menu_choice(3)
-        if choice is None:
-            return
-
-        unit_map = {
-            1: TemperatureUnit.CELSIUS,
-            2: TemperatureUnit.FAHRENHEIT,
-            3: TemperatureUnit.KELVIN,
-        }
-
-        self.unit_preferences.temperature = unit_map[choice]
-        self.formatter = WeatherFormatter(self.unit_preferences)
-        self.save_preferences()
-        print(f"✅ Temperature units changed to {self.unit_preferences.temperature.value.title()}")
-
-    def save_preferences(self) -> None:
-        """Save current preferences to storage."""
-        user_prefs = self.data_manager.get_user_preferences()
-        user_prefs["units"] = self.unit_preferences.to_dict()
-        self.data_manager.save_user_preferences(user_prefs)
-
-    def quick_unit_presets(self) -> None:
-        """Set quick unit presets (metric/imperial)."""
-        print("\n📦 QUICK UNIT PRESETS")
-        print("-" * 25)
-        print("1. Metric (°C, m/s, hPa, km)")
-        print("2. Imperial (°F, mph, inHg, miles)")
-
-        choice = self.get_menu_choice(2)
-        if choice is None:
-            return
-
-        if choice == 1:
-            self.unit_preferences = create_metric_preferences()
-            print("✅ Switched to metric units")
-        elif choice == 2:
-            self.unit_preferences = create_imperial_preferences()
-            print("✅ Switched to imperial units")
-
-        self.formatter = WeatherFormatter(self.unit_preferences)
-        self.save_preferences()
-
-    def view_current_settings(self) -> None:
-        """Display current settings and preferences."""
-        print("\n📊 CURRENT SETTINGS")
-        print("=" * 40)
-        print(self.formatter.get_unit_preferences_display())
-
-        # Show data statistics
-        print("\n" + "=" * 40)
-        from .storage import print_data_statistics
-
-        print_data_statistics(self.data_manager)
-
-        # Show configuration status
-        print("\n" + "=" * 40)
-        self.print_configuration_status()
-
-    def clear_cache(self) -> None:
-        """Clear weather data cache."""
-        confirm = input("❓ Clear weather cache? (y/N): ").lower().strip()
-        if confirm in ["y", "yes"]:
-            if self.history_manager.clear_cache():
-                print("✅ Cache cleared successfully.")
-            else:
-                print("❌ Failed to clear cache.")
-        else:
-            print("❌ Cache clearing cancelled.")
-
-    def data_management(self) -> None:
-        """Data management options."""
-        print("\n🗃️  DATA MANAGEMENT")
-        print("-" * 25)
-        print("1. Backup all data")
-        print("2. View data statistics")
-        print("3. Clear all application data")
-        print("4. Back to settings")
-
-        choice = self.get_menu_choice(4)
-
-        if choice == 1:
-            if self.data_manager.backup_all_data():
-                print("✅ Data backup created successfully.")
-            else:
-                print("❌ Failed to create backup.")
-        elif choice == 2:
-            from .storage import print_data_statistics
-
-            print_data_statistics(self.data_manager)
-        elif choice == 3:
-            self.clear_all_data()
-
-    def clear_all_data(self) -> None:
-        """Clear all application data with confirmation."""
-        print("\n⚠️  WARNING: This will delete ALL application data including:")
-        print("   • Favorite locations")
-        print("   • Query history")
-        print("   • User preferences")
-        print("   • Cached weather data")
-        print("\nThis action CANNOT be undone!")
-
-        confirm1 = input("\nType 'DELETE' to confirm: ").strip()
-        if confirm1 != "DELETE":
-            print("❌ Data clearing cancelled.")
-            return
-
-        confirm2 = input("Are you absolutely sure? (yes/no): ").lower().strip()
-        if confirm2 != "yes":
-            print("❌ Data clearing cancelled.")
-            return
-
-        try:
-            # Clear favorites
-            self.favorite_locations = FavoriteLocationsLinkedList()
-            self.data_manager.save_favorite_locations(self.favorite_locations)
-
-            # Clear history and cache
-            self.history_manager.clear_history()
-            self.history_manager.clear_cache()
-
-            # Reset preferences
-            self.unit_preferences = create_metric_preferences()
-            self.save_preferences()
-
-            print("✅ All application data has been cleared.")
-
-        except Exception as e:
-            print(f"❌ Error clearing data: {e}")
-
-    def show_help(self) -> None:
-        """Display help and information."""
-        help_text = """
-🌤️  WEATHER APPLICATION HELP
-
-GETTING STARTED:
-1. First time? Run 'Setup & Configuration' to set up your API key
-2. Get a free API key from: https://openweathermap.org/api
-3. Add some favorite locations for quick access
-
-MAIN FEATURES:
-• Current Weather: Get real-time weather for any city
-• Weather Forecast: 5-day weather forecast with details
-• Favorites: Save frequently checked locations
-• History: Track your weather queries over time
-• Units: Switch between metric and imperial units
-
-TIPS:
-• Use country codes (US, GB, CA) for better location accuracy
-• Data is cached for 10 minutes to reduce API calls
-• Favorites are sorted by most recently accessed
-• Export your query history for analysis
-
-KEYBOARD SHORTCUTS:
-• Ctrl+C: Cancel current operation
-• Enter: Accept default values when available
-
-TROUBLESHOOTING:
-• "API key invalid": Check your OpenWeatherMap API key
-• "Location not found": Try using a country code
-• "Rate limit exceeded": Wait a few minutes, free tier allows 60 calls/minute
-• "Network error": Check your internet connection
-
-DATA STORAGE:
-• All data is stored locally in the 'data' folder
-• Favorites, history, and preferences are automatically saved
-• Use 'Data Management' to backup or clear data
-
-For more help, visit: https://openweathermap.org/api
-"""
-        print(help_text)
-        input("\nPress Enter to continue...")
-
-    def setup_configuration(self) -> None:
-        """Setup and configuration menu."""
-        print("\n🔧 SETUP & CONFIGURATION")
-        print("-" * 30)
-
-        # Show current status
-        self.print_configuration_status()
-
-        print("\nSetup Options:")
-        print("1. Configure API key")
-        print("2. Test API connection")
-        print("3. View setup instructions")
-        print("4. Reset configuration")
-        print("5. Back to main menu")
-
-        choice = self.get_menu_choice(5)
-
-        if choice == 1:
-            self.configure_api_key()
-        elif choice == 2:
-            self.test_api_connection()
-        elif choice == 3:
-            print(self.config_manager.get_setup_instructions())
-            input("\nPress Enter to continue...")
-        elif choice == 4:
-            self.reset_configuration()
-        elif choice == 5:
-            return
-
-    def print_configuration_status(self) -> None:
-        """Print where the API key comes from (masked) and where it would be saved."""
-        status = self.config_manager.check_configuration()
-        print("🔧 Configuration:")
-        if status["api_key_found"]:
-            print(f"   API key:  {status['api_key_masked']} (from {status['api_key_source']})")
-            if not status["api_key_valid_format"]:
-                print("   ⚠️  The key does not look like a 32-character OpenWeatherMap key.")
-        else:
-            print("   API key:  not configured")
-        print(f"   Settings: {status['config_file']}")
-
-    def configure_api_key(self) -> None:
-        """Configure API key interactively."""
-        print()
-        print(self.config_manager.get_setup_instructions())
-        api_key = safe_input(
-            "\nPaste your API key (leave empty to cancel): ",
-            lambda text: (
-                ValidationResult(True, value=text)
-                if not text or self.config_manager.validate_api_key(text)
-                else ValidationResult(
-                    False, error_message="An API key is 32 hexadecimal characters."
-                )
-            ),
-        )
-        if not api_key:
-            print("Setup cancelled.")
-            return
-        try:
-            path = self.config_manager.save_api_key(api_key)
-        except ConfigError as e:
-            print(f"❌ {e}")
-            return
-        print(f"✅ API key saved to {path}")
-        self._init_api_handler()
-
-    def test_api_connection(self) -> None:
-        """Test API connection and key validity."""
-        if not self.api_handler:
-            print("❌ API handler not initialized. Please configure your API key first.")
-            return
-
-        print("🔍 Testing API connection...")
-
-        try:
-            if self.api_handler.validate_api_key():
-                print("✅ API connection successful!")
-
-                # Test a simple request
-                weather_data, location = self.api_handler.get_current_weather_by_name(
-                    "London", "GB"
-                )
-                print(f"✅ Test query successful: {weather_data.temperature}°C in {location}")
-
-            else:
-                print("❌ API key validation failed.")
-
-        except APIError as e:
-            error_msg, suggestions = describe_error(e)
-            print(f"❌ {error_msg}")
-            for suggestion in suggestions:
-                print(f"   💡 {suggestion}")
-        except Exception as e:
-            print(f"❌ Unexpected error: {e}")
-
-    def reset_configuration(self) -> None:
-        """Reset all configuration with confirmation."""
-        confirm = (
-            input("❓ Reset all configuration? This will clear API key settings. (y/N): ")
-            .lower()
-            .strip()
-        )
-        if confirm in ["y", "yes"]:
-            try:
-                removed = self.config_manager.clear_api_key()
-            except ConfigError as e:
-                print(f"❌ {e}")
-                return
-            if removed:
-                print("✅ Saved API key removed.")
-            lookup = self.config_manager.find_api_key()
-            if lookup.found:
-                print(f"ℹ️  A key is still provided by {lookup.source}.")
-            else:
-                self.api_handler = None
-        else:
-            print("❌ Configuration reset cancelled.")
-
-    def run(self) -> None:
-        """Main application loop."""
-        print("🌤️  Welcome to the Weather Application!")
-        print("Get current weather, forecasts, and manage your favorite locations.")
-
-        # Show initial setup message if API not configured
-        if not self.api_handler:
-            print("\n⚠️  First time setup required:")
-            print("Please configure your OpenWeatherMap API key to get started.")
-            print("Choose 'Setup & Configuration' from the main menu.")
-
-        while self.running:
-            try:
-                self.display_main_menu()
-                choice = self.get_menu_choice(9)
-
-                if choice == 1:
-                    self.get_current_weather()
-                elif choice == 2:
-                    self.get_weather_forecast()
-                elif choice == 3:
-                    self.manage_favorites()
-                elif choice == 4:
-                    self.view_query_history()
-                elif choice == 5:
-                    self.manage_reports()
-                elif choice == 6:
-                    self.manage_settings()
-                elif choice == 7:
-                    self.setup_configuration()
-                elif choice == 8:
-                    self.show_help()
-                elif choice == 9:
-                    self.running = False
-                else:
-                    print("❌ Invalid choice. Please try again.")
-
-            except KeyboardInterrupt:
-                print("\n\n👋 Application interrupted. Goodbye!")
-                self.running = False
-            except Exception as e:
-                print(f"\n❌ Unexpected error: {e}")
-                print("The application will continue running.")
-
-        print("\n👋 Thank you for using the Weather Application!")
-        print("Have a great day! 🌤️")
-
-    def manage_reports(self) -> None:
-        """Handle weather reports and analysis menu."""
-        while True:
-            try:
-                self.display_reports_menu()
-                choice = self.get_menu_choice(8)
-
-                if choice == 1:
-                    self.generate_weather_comparison_report()
-                elif choice == 2:
-                    self.generate_forecast_analysis_report()
-                elif choice == 3:
-                    self.generate_location_statistics_report()
-                elif choice == 4:
-                    self.generate_temperature_trends_report()
-                elif choice == 5:
-                    self.generate_custom_report()
-                elif choice == 6:
-                    self.export_report_data()
-                elif choice == 7:
-                    self.view_query_statistics()
-                elif choice == 8:
-                    break
-                else:
-                    print("❌ Invalid choice. Please try again.")
-
-            except KeyboardInterrupt:
-                print("\n⚠️  Operation cancelled.")
-                break
-            except Exception as e:
-                print(f"❌ Error in reports menu: {e}")
-
-    def generate_weather_comparison_report(self) -> None:
-        """Generate a current weather comparison report."""
-        print("\n📊 CURRENT WEATHER COMPARISON REPORT")
-        print("=" * 50)
-
-        if not self.api_handler:
-            print("❌ API not configured. Please configure your API key first.")
-            return
-
-        if self.favorite_locations.size == 0:
-            print("❌ No favorite locations found.")
-            print("Add some favorites first to generate a comparison report.")
-            return
-
-        locations_data = []
-        print("Fetching current weather for all favorite locations...")
-
-        # Get weather for all favorites
-        for location in self.favorite_locations.get_all_locations():
-            try:
-                print(f"  • Fetching {location.city}, {location.country}...")
-                weather_data, _ = self.api_handler.get_current_weather_by_name(
-                    location.city, location.country
-                )
-                locations_data.append((location, weather_data))
-
-                # Cache the data
-                self.history_manager.cache_weather_data(location, weather_data)
-
-            except Exception as e:
-                print(f"    ⚠️  Failed to fetch {location.city}: {e}")
-
-        if not locations_data:
-            print("❌ No weather data could be retrieved.")
-            return
-
-        # Generate and display report
-        report = self.report_generator.generate_current_weather_report(locations_data)
-        print("\n" + report.to_table_string())
-
-        # Ask if user wants to export
-        export_choice = safe_input("\n💾 Export this report? (y/N): ")
-        if export_choice and export_choice.lower() == "y":
-            self._export_report(report, "weather_comparison")
-
-    def generate_forecast_analysis_report(self) -> None:
-        """Generate a forecast analysis report."""
-        print("\n📅 FORECAST ANALYSIS REPORT")
-        print("=" * 50)
-
-        # Get location
-        location_name = safe_input("Enter city name: ").strip()
-        if not location_name:
-            print("❌ City name is required.")
-            return
-
-        country = safe_input("Enter country code (optional): ").strip() or None
-
-        # Validate inputs
-        city_result = InputValidator.validate_city_name(location_name)
-        if not city_result.is_valid:
-            print(f"❌ Invalid city name: {city_result.error_message}")
-            return
-
-        if country:
-            country_result = InputValidator.validate_country_code(country)
-            if not country_result.is_valid:
-                print(f"❌ Invalid country code: {country_result.error_message}")
-                return
-            country = country_result.value
-
-        try:
-            print(f"Fetching 5-day forecast for {location_name}...")
-            forecast_data, location = self.api_handler.get_forecast_by_name(
-                location_name, country, 5
-            )
-
-            # Generate and display report
-            report = self.report_generator.generate_detailed_forecast_report(
-                location, forecast_data
-            )
-            print("\n" + report.to_table_string())
-
-            # Cache the data
-            self.history_manager.cache_forecast_data(location, forecast_data)
-            self.history_manager.add_query(location, None, "forecast")
-
-            # Ask if user wants to export
-            export_choice = safe_input("\n💾 Export this report? (y/N): ").lower()
-            if export_choice == "y":
-                self._export_report(report, f"forecast_{location.city.lower()}")
-
-        except APIError as e:
-            error_msg, suggestions = describe_error(e)
-            print(f"❌ API Error: {error_msg}")
-            if suggestions:
-                print("💡 Suggestions:")
-                for suggestion in suggestions:
-                    print(f"  • {suggestion}")
-        except Exception as e:
-            print(f"❌ Error generating forecast report: {e}")
-
-    def generate_location_statistics_report(self) -> None:
-        """Generate a location usage statistics report."""
-        print("\n📍 LOCATION STATISTICS REPORT")
-        print("=" * 50)
-
-        queries = self.history_manager.get_recent_queries(1000)  # Get lots of history
-
-        if not queries:
-            print("❌ No query history found.")
-            print("Make some weather queries first to generate statistics.")
-            return
-
-        # Generate and display report
-        report = self.report_generator.generate_location_statistics_report(queries)
-        print("\n" + report.to_table_string())
-
-        # Ask if user wants to export
-        export_choice = safe_input("\n💾 Export this report? (y/N): ").lower()
-        if export_choice == "y":
-            self._export_report(report, "location_statistics")
-
-    def generate_temperature_trends_report(self) -> None:
-        """Generate a temperature trends report for a location."""
-        print("\n📈 TEMPERATURE TRENDS REPORT")
-        print("=" * 50)
-
-        # Get location
-        location_name = safe_input("Enter city name: ").strip()
-        if not location_name:
-            print("❌ City name is required.")
-            return
-
-        country = safe_input("Enter country code (optional): ").strip() or None
-
-        # Validate inputs
-        city_result = InputValidator.validate_city_name(location_name)
-        if not city_result.is_valid:
-            print(f"❌ Invalid city name: {city_result.error_message}")
-            return
-
-        if country:
-            country_result = InputValidator.validate_country_code(country)
-            if not country_result.is_valid:
-                print(f"❌ Invalid country code: {country_result.error_message}")
-                return
-            country = country_result.value
-
-        # Find matching queries in history
-        queries = self.history_manager.get_recent_queries(1000)
-        matching_queries = []
-
-        for query in queries:
-            if (
-                query.location.city.lower() == location_name.lower()
-                and (not country or query.location.country.lower() == country.lower())
-                and query.weather_data
-            ):
-                matching_queries.append((query.query_time, query.weather_data))
-
-        if len(matching_queries) < 2:
-            print(f"❌ Not enough historical data for {location_name}.")
-            print("At least 2 weather queries are needed for trend analysis.")
-            return
-
-        # Create a location object for the report
-        try:
-            location = self.api_handler.get_location_by_name(location_name, country)
-        except APIError:
-            # Fallback location if API fails
-            from .models import Location
-
-            location = Location(location_name, country or "Unknown", 0, 0)
-
-        # Generate and display report
-        report = self.report_generator.generate_temperature_trend_report(location, matching_queries)
-        print("\n" + report.to_table_string())
-
-        # Ask if user wants to export
-        export_choice = safe_input("\n💾 Export this report? (y/N): ").lower()
-        if export_choice == "y":
-            self._export_report(report, f"temperature_trends_{location.city.lower()}")
-
-    def generate_custom_report(self) -> None:
-        """Generate a custom report based on user selection."""
-        print("\n📋 CUSTOM REPORT GENERATOR")
-        print("=" * 50)
-        print("1. 🌍 Multi-location current weather")
-        print("2. 📅 Multi-location forecast comparison")
-        print("3. 📊 Historical query analysis")
-        print("4. ⬅️  Back to reports menu")
-
-        choice = self.get_menu_choice(4)
-
-        if choice == 1:
-            self._generate_multi_location_current_report()
-        elif choice == 2:
-            self._generate_multi_location_forecast_report()
-        elif choice == 3:
-            self._generate_historical_analysis_report()
-        elif choice == 4:
-            return
-
-    def _generate_multi_location_current_report(self) -> None:
-        """Generate current weather report for multiple user-specified locations."""
-        print("\n🌍 MULTI-LOCATION CURRENT WEATHER REPORT")
-        print("=" * 50)
-
-        locations_input = safe_input(
-            "Enter cities (comma-separated, e.g., 'London,GB Paris,FR Tokyo,JP'): "
-        ).strip()
-        if not locations_input:
-            print("❌ No locations entered.")
-            return
-
-        locations_data = []
-        city_entries = [city.strip() for city in locations_input.split(",")]
-
-        for city_entry in city_entries:
-            parts = city_entry.split(",")
-            city = parts[0].strip()
-            country = parts[1].strip() if len(parts) > 1 else None
-
-            if not city:
-                continue
-
-            try:
-                print(f"  • Fetching {city}...")
-                weather_data, location = self.api_handler.get_current_weather_by_name(city, country)
-                locations_data.append((location, weather_data))
-
-                # Cache and track
-                self.history_manager.cache_weather_data(location, weather_data)
-                self.history_manager.add_query(location, weather_data, "current")
-
-            except Exception as e:
-                print(f"    ⚠️  Failed to fetch {city}: {e}")
-
-        if not locations_data:
-            print("❌ No weather data could be retrieved.")
-            return
-
-        # Generate and display report
-        report = self.report_generator.generate_current_weather_report(locations_data)
-        print("\n" + report.to_table_string())
-
-        # Ask if user wants to export
-        export_choice = safe_input("\n💾 Export this report? (y/N): ").lower()
-        if export_choice == "y":
-            self._export_report(report, "multi_location_current")
-
-    def _generate_multi_location_forecast_report(self) -> None:
-        """Generate forecast comparison for multiple locations."""
-        print("\n📅 MULTI-LOCATION FORECAST COMPARISON")
-        print("=" * 50)
-
-        locations_input = safe_input("Enter cities (comma-separated): ").strip()
-        if not locations_input:
-            print("❌ No locations entered.")
-            return
-
-        forecasts_data = []
-        city_entries = [city.strip() for city in locations_input.split(",")]
-
-        for city_entry in city_entries:
-            parts = city_entry.split(",")
-            city = parts[0].strip()
-            country = parts[1].strip() if len(parts) > 1 else None
-
-            if not city:
-                continue
-
-            try:
-                print(f"  • Fetching 5-day forecast for {city}...")
-                forecast_data, location = self.api_handler.get_forecast_by_name(city, country, 5)
-                forecasts_data.append((location, forecast_data))
-
-                # Cache the data
-                self.history_manager.cache_forecast_data(location, forecast_data)
-                self.history_manager.add_query(location, None, "forecast")
-
-            except Exception as e:
-                print(f"    ⚠️  Failed to fetch forecast for {city}: {e}")
-
-        if not forecasts_data:
-            print("❌ No forecast data could be retrieved.")
-            return
-
-        # Generate and display report
-        report = self.report_generator.generate_forecast_comparison_report(forecasts_data)
-        print("\n" + report.to_table_string())
-
-        # Ask if user wants to export
-        export_choice = safe_input("\n💾 Export this report? (y/N): ").lower()
-        if export_choice == "y":
-            self._export_report(report, "multi_location_forecast")
-
-    def _generate_historical_analysis_report(self) -> None:
-        """Generate historical query analysis report."""
-        print("\n📊 HISTORICAL QUERY ANALYSIS")
-        print("=" * 50)
-
-        limit_input = safe_input("Number of recent queries to analyze (default 50): ").strip()
-        try:
-            limit = int(limit_input) if limit_input else 50
-            limit = max(1, min(limit, 1000))  # Clamp between 1 and 1000
-        except ValueError:
-            limit = 50
-
-        queries = self.history_manager.get_recent_queries(limit)
-
-        if not queries:
-            print("❌ No query history found.")
-            return
-
-        # Generate and display report
-        report = self.report_generator.generate_query_history_report(queries, limit)
-        print("\n" + report.to_table_string())
-
-        # Ask if user wants to export
-        export_choice = safe_input("\n💾 Export this report? (y/N): ").lower()
-        if export_choice == "y":
-            self._export_report(report, "historical_analysis")
-
-    def export_report_data(self) -> None:
-        """Export weather data in various formats."""
-        print("\n💾 EXPORT REPORT DATA")
-        print("=" * 50)
-        print("1. 📄 Export recent queries (JSON)")
-        print("2. 📊 Export favorites list (CSV)")
-        print("3. 📈 Export query statistics (JSON)")
-        print("4. 💾 Export all data (Backup)")
-        print("5. ⬅️  Back to reports menu")
-
-        choice = self.get_menu_choice(5)
-
-        if choice == 1:
-            self._export_recent_queries()
-        elif choice == 2:
-            self._export_favorites_list()
-        elif choice == 3:
-            self._export_query_statistics()
-        elif choice == 4:
-            self._export_all_data()
-        elif choice == 5:
-            return
-
-    def view_query_statistics(self) -> None:
-        """Display detailed query statistics."""
-        print("\n📊 QUERY STATISTICS")
-        print("=" * 50)
-
-        stats = self.history_manager.get_query_statistics()
-
-        print(f"Total Queries: {stats['total_queries']}")
-        print(f"Unique Locations: {len(stats.get('unique_locations', []))}")
-
-        if stats.get("most_queried_locations"):
-            print("\n🏆 Most Queried Locations:")
-            for i, (location, count) in enumerate(stats["most_queried_locations"][:10], 1):
-                print(f"  {i:2d}. {location}: {count} queries")
-
-        cache_stats = stats.get("cache_stats", {})
-        if cache_stats:
-            print("\n💾 Cache Statistics:")
-            print(f"  Valid Entries: {cache_stats.get('valid_entries', 0)}")
-            print(f"  Expired Entries: {cache_stats.get('expired_entries', 0)}")
-            print(f"  Cache Hit Rate: {cache_stats.get('hit_rate', 0):.1f}%")
-
-        if stats.get("query_types"):
-            print("\n📊 Query Types:")
-            for query_type, count in stats["query_types"].items():
-                print(f"  {query_type.title()}: {count}")
-
-        print("\n" + "=" * 50)
-        input("Press Enter to continue...")
-
-    def _export_report(self, report, base_filename: str) -> None:
-        """Export a report to file with format selection."""
-        print("\n💾 EXPORT REPORT")
-        print("=" * 30)
-        print("1. 📄 Plain Text (.txt)")
-        print("2. 📊 CSV (.csv)")
-        print("3. 📋 JSON (.json)")
-
-        format_choice = self.get_menu_choice(3)
-
-        if format_choice == 1:
-            format_type = "txt"
-        elif format_choice == 2:
-            format_type = "csv"
-        elif format_choice == 3:
-            format_type = "json"
-        else:
-            print("❌ Invalid choice.")
-            return
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{base_filename}_{timestamp}.{format_type}"
-
-        try:
-            from .reporting import ReportExporter
-
-            if ReportExporter.export_to_file(report, filename, format_type):
-                print(f"✅ Report exported to: {filename}")
-            else:
-                print("❌ Failed to export report.")
-        except Exception as e:
-            print(f"❌ Error exporting report: {e}")
-
-    def _export_recent_queries(self) -> None:
-        """Export recent queries to JSON."""
-        try:
-            filename = f"weather_queries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            if self.history_manager.export_history(filename):
-                print(f"✅ Recent queries exported to: {filename}")
-            else:
-                print("❌ Failed to export queries.")
-        except Exception as e:
-            print(f"❌ Error exporting queries: {e}")
-
-    def _export_favorites_list(self) -> None:
-        """Export favorites list to CSV."""
-        try:
-            favorites = self.favorite_locations.get_all_locations()
-            filename = f"weather_favorites_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
-            with open(filename, "w", encoding="utf-8") as f:
-                f.write("City,Country,Latitude,Longitude,Date Added\n")
-                for location in favorites:
-                    f.write(
-                        f'"{location.city}","{location.country}",{location.latitude},{location.longitude},"{location.added_date.strftime("%Y-%m-%d")}"\n'
-                    )
-
-            print(f"✅ Favorites exported to: {filename}")
-        except Exception as e:
-            print(f"❌ Error exporting favorites: {e}")
-
-    def _export_query_statistics(self) -> None:
-        """Export query statistics to JSON."""
-        try:
-            stats = self.history_manager.get_query_statistics()
-            filename = f"weather_statistics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-
-            import json
-
-            with open(filename, "w", encoding="utf-8") as f:
-                json.dump(stats, f, indent=2, ensure_ascii=False, default=str)
-
-            print(f"✅ Query statistics exported to: {filename}")
-        except Exception as e:
-            print(f"❌ Error exporting statistics: {e}")
-
-    def _export_all_data(self) -> None:
-        """Create a complete data backup."""
-        try:
-            if self.data_manager.backup_all_data():
-                print("✅ Complete data backup created successfully.")
-            else:
-                print("❌ Failed to create data backup.")
-        except Exception as e:
-            print(f"❌ Error creating backup: {e}")
-
-
-def main():
-    """Main entry point for the CLI application."""
+    else:
+        app.print(f"{len(forecast)}-day forecast for {location.display_name}")
+        app.print(describe_forecast(forecast, app.fmt))
+    return EXIT_OK
+
+
+# Favorites -------------------------------------------------------------------
+
+
+def cmd_favorites_list(app: App, args: argparse.Namespace) -> int:
+    favorites = list(app.service.favorites)
+    if args.json:
+        _dump_json(app, [loc.to_dict() for loc in favorites])
+    elif favorites:
+        app.print(favorites_table(favorites))
+    else:
+        app.print("No favorites yet. Add one with: meteormind favorites add PLACE")
+    return EXIT_OK
+
+
+def cmd_favorites_add(app: App, args: argparse.Namespace) -> int:
+    location = resolve_place(app, args.place, args.pick)
+    if app.service.add_favorite(location):
+        app.print(f"Added {location.display_name} to favorites.")
+    else:
+        app.print(f"{location.display_name} is already a favorite.")
+    return EXIT_OK
+
+
+def cmd_favorites_remove(app: App, args: argparse.Namespace) -> int:
+    query = _place(args.place)
+    location = app.service.find_favorite(query)
+    if location is None:
+        app.warn(f"Error: '{query}' is not one of your favorites.")
+        return EXIT_ERROR
+    app.service.remove_favorite(location)
+    app.print(f"Removed {location.display_name} from favorites.")
+    return EXIT_OK
+
+
+# History ---------------------------------------------------------------------
+
+
+def cmd_history_list(app: App, args: argparse.Namespace) -> int:
+    history = app.service.history
+    if args.search:
+        queries = history.search_queries(args.search, args.limit)
+    else:
+        queries = history.get_recent_queries(args.limit)
+    if args.json:
+        _dump_json(app, [q.to_dict() for q in queries])
+    elif queries:
+        app.print(history_table(queries, app.fmt))
+    else:
+        app.print("No matching queries." if args.search else "No queries yet.")
+    return EXIT_OK
+
+
+def cmd_history_clear(app: App, args: argparse.Namespace) -> int:
+    if not args.yes:
+        if not sys.stdin.isatty():
+            app.warn("Error: pass --yes to clear the history without a prompt.")
+            return EXIT_USAGE
+        answer = input(f"Delete all {len(app.service.history)} queries? [y/N] ")
+        if answer.strip().lower() not in {"y", "yes"}:
+            app.print("Cancelled.")
+            return EXIT_OK
+    app.service.history.clear_history()
+    app.print("History cleared.")
+    return EXIT_OK
+
+
+def cmd_history_export(app: App, args: argparse.Namespace) -> int:
+    path = app.service.history.export_history(args.file)
+    app.print(f"Exported {len(app.service.history)} queries to {path}")
+    return EXIT_OK
+
+
+# Reports ---------------------------------------------------------------------
+
+
+def cmd_report(app: App, args: argparse.Namespace) -> int:
+    report, warnings = app.service.build_report(args.kind, args.places, args.days)
+    for warning in warnings:
+        app.warn(f"Warning: {warning}")
+    if args.output:
+        path = write_report(report, args.output, args.format)
+        app.print(f"Saved the report to {path}")
+    else:
+        app.print(render_report(report, args.format or "txt"))
+    return EXIT_OK
+
+
+# Configuration ---------------------------------------------------------------
+
+
+def cmd_config_show(app: App, args: argparse.Namespace) -> int:
+    service = app.service
+    status = service.config.check_configuration()
+    if status["api_key_found"]:
+        key = f"{status['api_key_masked']} (from {status['api_key_source']})"
+        if not status["api_key_valid_format"]:
+            key += "; this does not look like an OpenWeatherMap key"
+    else:
+        key = "not set (run: meteormind config set-key)"
+    units = service.preferences.units
+    app.print(f"API key       {key}")
+    app.print(f"Data folder   {service.store.directory}")
+    app.print(
+        f"Units         {units.temperature.symbol}, {units.wind_speed.symbol}, "
+        f"{units.pressure.symbol}, {units.distance.symbol}"
+    )
+    app.print(f"Theme         {service.preferences.theme}")
+    app.print(f"History size  {service.preferences.history_limit} queries")
+    app.print(f"Cache         {service.preferences.cache_minutes} minutes")
+    return EXIT_OK
+
+
+def _read_key(app: App) -> str:
+    if sys.stdin.isatty():
+        app.print(app.service.config.get_setup_instructions())
+        app.print()
+        return getpass.getpass("API key (input is hidden): ")
+    return sys.stdin.readline()
+
+
+def cmd_config_set_key(app: App, args: argparse.Namespace) -> int:
+    key = (args.key or _read_key(app)).strip()
+    if not key:
+        app.warn("Error: no key given.")
+        return EXIT_USAGE
+    if not app.service.config.validate_api_key(key):
+        raise InputError("An OpenWeatherMap API key is 32 hexadecimal characters.")
+    path = app.service.set_api_key(key)
+    app.print(f"Saved the API key to {path}")
+    return EXIT_OK
+
+
+def cmd_config_clear_key(app: App, args: argparse.Namespace) -> int:
+    if app.service.clear_api_key():
+        app.print("Removed the saved API key.")
+    else:
+        app.print("No API key was saved.")
+    lookup = app.service.config.find_api_key()
+    if lookup.found:
+        app.print(f"A key is still provided by {lookup.source}.")
+    return EXIT_OK
+
+
+# Parser ----------------------------------------------------------------------
+
+
+def _add_common_options(parser: argparse.ArgumentParser, *, top_level: bool) -> None:
+    # On subcommands the defaults are suppressed so they do not overwrite a
+    # value given before the subcommand name.
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        default=False if top_level else argparse.SUPPRESS,
+        help="use built-in sample data instead of OpenWeatherMap (no API key needed)",
+    )
+    parser.add_argument(
+        "--units",
+        choices=("metric", "imperial"),
+        default=None if top_level else argparse.SUPPRESS,
+        help="display units for this run (default: your saved preference)",
+    )
+
+
+def _add_days_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-d",
+        "--days",
+        type=int,
+        choices=range(1, MAX_FORECAST_DAYS + 1),
+        default=MAX_FORECAST_DAYS,
+        metavar=f"1-{MAX_FORECAST_DAYS}",
+        help=f"number of forecast days (default {MAX_FORECAST_DAYS})",
+    )
+
+
+def _add_pick_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-p",
+        "--pick",
+        type=int,
+        metavar="N",
+        help="when the name matches several places, use the Nth (default: ask, or the first)",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="meteormind",
+        description="Current weather and forecasts from OpenWeatherMap. "
+        "Run without a command for the interactive menu.",
+        epilog="Places can include a country code, e.g. 'Paris, FR'. "
+        "Add --demo to any command to try it without an API key.",
+    )
+    parser.add_argument("--version", action="version", version=f"MeteorMind {__version__}")
+    _add_common_options(parser, top_level=True)
+    # Flags from earlier versions.
+    parser.add_argument("--cli", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--gui", action="store_true", help=argparse.SUPPRESS)
+    parser.set_defaults(handler=None)
+
+    commands = parser.add_subparsers(title="commands", dest="command", metavar="COMMAND")
+
+    def command(name: str, help_text: str, handler: Handler | None) -> argparse.ArgumentParser:
+        sub = commands.add_parser(name, help=help_text, description=help_text)
+        _add_common_options(sub, top_level=False)
+        sub.set_defaults(handler=handler)
+        return sub
+
+    current = command("current", "show the current weather for a place", cmd_current)
+    current.add_argument("place", nargs="+", help="for example: London, or New York, US")
+    current.add_argument("--json", action="store_true", help="print JSON (metric units)")
+    _add_pick_option(current)
+
+    forecast = command("forecast", "show the daily forecast for a place", cmd_forecast)
+    forecast.add_argument("place", nargs="+")
+    _add_days_option(forecast)
+    forecast.add_argument("--json", action="store_true", help="print JSON (metric units)")
+    _add_pick_option(forecast)
+
+    favorites = command("favorites", "list or change your favorite places", cmd_favorites_list)
+    favorites.add_argument("--json", action="store_true")
+    fav_commands = favorites.add_subparsers(dest="favorites_command", metavar="ACTION")
+    fav_commands.add_parser("list", help="list favorites (the default)")
+    fav_add = fav_commands.add_parser("add", help="add a place")
+    fav_add.add_argument("place", nargs="+")
+    _add_pick_option(fav_add)
+    fav_add.set_defaults(handler=cmd_favorites_add)
+    fav_remove = fav_commands.add_parser("remove", help="remove a favorite")
+    fav_remove.add_argument("place", nargs="+")
+    fav_remove.set_defaults(handler=cmd_favorites_remove)
+
+    history = command("history", "show, search, export or clear past queries", cmd_history_list)
+    history.add_argument("-n", "--limit", type=int, default=20, help="how many (default 20)")
+    history.add_argument("-s", "--search", metavar="TEXT", help="only places containing TEXT")
+    history.add_argument("--json", action="store_true")
+    hist_commands = history.add_subparsers(dest="history_command", metavar="ACTION")
+    hist_commands.add_parser("list", help="show recent queries (the default)")
+    hist_clear = hist_commands.add_parser("clear", help="delete the history")
+    hist_clear.add_argument("-y", "--yes", action="store_true", help="do not ask to confirm")
+    hist_clear.set_defaults(handler=cmd_history_clear)
+    hist_export = hist_commands.add_parser("export", help="save the history as JSON")
+    hist_export.add_argument("file", type=Path)
+    hist_export.set_defaults(handler=cmd_history_export)
+
+    report = command("report", "build a report and print or save it", cmd_report)
+    report.add_argument(
+        "kind",
+        choices=REPORT_KINDS,
+        metavar="KIND",
+        help="; ".join(f"{name}: {text}" for name, text in REPORT_KINDS.items()),
+    )
+    report.add_argument("places", nargs="*", metavar="PLACE", help="quote names with spaces")
+    report.add_argument(
+        "-f", "--format", choices=REPORT_FORMATS, help="txt, csv or json (default: from FILE)"
+    )
+    report.add_argument("-o", "--output", type=Path, metavar="FILE", help="save instead of print")
+    _add_days_option(report)
+
+    config = command("config", "show or change settings", cmd_config_show)
+    config_commands = config.add_subparsers(dest="config_command", metavar="ACTION")
+    config_commands.add_parser("show", help="show the current settings (the default)")
+    set_key = config_commands.add_parser(
+        "set-key",
+        help="save your OpenWeatherMap API key",
+        description="Save your OpenWeatherMap API key. Without KEY it is read from a "
+        "hidden prompt, or from standard input when that is not a terminal.",
+    )
+    set_key.add_argument("key", nargs="?", help="the key (prefer the prompt: shells keep history)")
+    set_key.set_defaults(handler=cmd_config_set_key)
+    clear_key = config_commands.add_parser("clear-key", help="remove the saved API key")
+    clear_key.set_defaults(handler=cmd_config_clear_key)
+
+    command("gui", "open the desktop app", None)
+    command("menu", "start the interactive menu (the default)", None)
+    return parser
+
+
+def run_gui(demo: bool) -> int:
     try:
-        app = WeatherCLI()
-        app.run()
+        from .gui import main as gui_main
+    except ImportError as exc:  # pragma: no cover - depends on the Python build
+        print(f"Error: the desktop app needs Tkinter ({exc}).", file=sys.stderr)
+        return EXIT_ERROR
+    return gui_main(["--demo"] if demo else [])
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    configure_stream(sys.stdout)
+    configure_stream(sys.stderr)
+    logging.basicConfig(level=logging.WARNING, format="Warning: %(message)s")
+    args = build_parser().parse_args(argv)
+
+    if args.command == "gui" or (args.gui and not args.command):
+        return run_gui(args.demo)
+
+    try:
+        service = WeatherService.create(demo=args.demo)
+        if args.units:
+            presets = {"metric": create_metric_preferences, "imperial": create_imperial_preferences}
+            service.preferences.units = presets[args.units]()
+        if args.handler is None:
+            from .menu import Menu
+
+            return Menu(service).run()
+        interactive = sys.stdin.isatty() and sys.stderr.isatty()
+        return int(args.handler(App(service, interactive=interactive), args))
     except KeyboardInterrupt:
-        print("\n\n👋 Application interrupted. Goodbye!")
-    except Exception as e:
-        print(f"\n❌ Fatal error: {e}")
-        print("Please report this issue if it persists.")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+        print(file=sys.stderr)
+        return EXIT_INTERRUPTED
+    except InputError as exc:
+        print(describe_error(exc), file=sys.stderr)
+        return EXIT_USAGE
+    except (APIError, ConfigError, ReportError, StorageError) as exc:
+        print(describe_error(exc), file=sys.stderr)
+        return EXIT_ERROR

@@ -1,0 +1,14 @@
+Current Weather Report
+======================
+
+Location                     Temperature  Feels Like  Conditions        Humidity  Pressure  Wind Speed  Updated
+---------------------------  -----------  ----------  ----------------  --------  --------  ----------  -------
+London, England, GB                5.0°C       2.0°C  Clear sky              76%  1001 hPa     7.6 m/s  12:00
+Paris, Ile-de-France, FR           7.6°C       4.4°C  Few clouds             54%  1023 hPa     8.0 m/s  12:00
+Tokyo, JP                          9.9°C       8.3°C  Scattered clouds       68%  1004 hPa     4.0 m/s  12:00
+New York, New York, US             9.3°C       8.5°C  Few clouds             80%  1020 hPa     2.1 m/s  12:00
+Sydney, New South Wales, AU       19.6°C      18.6°C  Light rain             74%  1022 hPa     2.6 m/s  12:00
+
+5 places | average 10.3°C | range 5.0°C to 19.6°C
+
+Generated 2026-01-15 09:30

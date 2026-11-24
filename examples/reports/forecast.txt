@@ -1,0 +1,14 @@
+Detailed Forecast - London, England, GB
+=======================================
+
+Date        Day     Low    High  Conditions        Humidity    Wind  Precip
+----------  ---  ------  ------  ----------------  --------  ------  ------
+2026-01-15  Thu  34.3°F  46.8°F  Clear sky              50%  17 mph      9%
+2026-01-16  Fri  32.7°F  46.4°F  Scattered clouds       89%  18 mph     20%
+2026-01-17  Sat  27.7°F  48.7°F  Light rain             90%   3 mph     81%
+2026-01-18  Sun  33.6°F  46.2°F  Clear sky              58%   7 mph     18%
+2026-01-19  Mon  33.1°F  52.3°F  Overcast clouds        82%  16 mph     10%
+
+5-day forecast starting Thursday 15 January 2026
+
+Generated 2026-01-15 09:30

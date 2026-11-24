@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -164,32 +163,3 @@ class InputValidator:
                     False, error_message=f"Use at most {decimal_places} decimal places"
                 )
         return ValidationResult(True, value=number)
-
-
-def safe_input(
-    prompt: str,
-    validator_func: Callable[[str], ValidationResult] | None = None,
-    max_attempts: int = 3,
-) -> Any | None:
-    """Prompt until the validator accepts the input.
-
-    Returns the validated value, the raw text when no validator is given, or
-    None when input is cancelled (Ctrl+C / end of input) or attempts run out.
-    """
-    for attempt in range(1, max_attempts + 1):
-        try:
-            text = input(prompt).strip()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            return None
-        if validator_func is None:
-            return text
-        result = validator_func(text)
-        if result.is_valid:
-            return result.value
-        print(f"❌ {result.error_message}")
-        for suggestion in result.suggestions:
-            print(f"   💡 {suggestion}")
-        if attempt < max_attempts:
-            print(f"   Try again ({max_attempts - attempt} attempts remaining)")
-    return None

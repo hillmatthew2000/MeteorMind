@@ -21,7 +21,7 @@ _METRES_PER_MILE = 1609.344
 _METRES_PER_FOOT = 0.3048
 
 
-class _UnitEnum(str, Enum):
+class UnitEnum(str, Enum):
     """String-valued enum that also accepts its value in any letter case."""
 
     @classmethod
@@ -37,35 +37,40 @@ class _UnitEnum(str, Enum):
     def symbol(self) -> str:
         return _SYMBOLS[self]
 
+    @property
+    def label(self) -> str:
+        """The unit's name for display, e.g. "miles per hour"."""
+        return _LABELS[self]
 
-class TemperatureUnit(_UnitEnum):
+
+class TemperatureUnit(UnitEnum):
     CELSIUS = "celsius"
     FAHRENHEIT = "fahrenheit"
     KELVIN = "kelvin"
 
 
-class WindSpeedUnit(_UnitEnum):
+class WindSpeedUnit(UnitEnum):
     METERS_PER_SECOND = "mps"
     KILOMETERS_PER_HOUR = "kmh"
     MILES_PER_HOUR = "mph"
     KNOTS = "knots"
 
 
-class PressureUnit(_UnitEnum):
+class PressureUnit(UnitEnum):
     HECTOPASCAL = "hpa"
     INCHES_OF_MERCURY = "inHg"
     MILLIBARS = "mbar"
     ATMOSPHERES = "atm"
 
 
-class DistanceUnit(_UnitEnum):
+class DistanceUnit(UnitEnum):
     KILOMETERS = "km"
     MILES = "miles"
     METERS = "m"
     FEET = "ft"
 
 
-_SYMBOLS: dict[_UnitEnum, str] = {
+_SYMBOLS: dict[UnitEnum, str] = {
     TemperatureUnit.CELSIUS: "°C",
     TemperatureUnit.FAHRENHEIT: "°F",
     TemperatureUnit.KELVIN: "K",
@@ -83,7 +88,25 @@ _SYMBOLS: dict[_UnitEnum, str] = {
     DistanceUnit.FEET: "ft",
 }
 
-_E = TypeVar("_E", bound=_UnitEnum)
+_LABELS: dict[UnitEnum, str] = {
+    TemperatureUnit.CELSIUS: "Celsius",
+    TemperatureUnit.FAHRENHEIT: "Fahrenheit",
+    TemperatureUnit.KELVIN: "Kelvin",
+    WindSpeedUnit.METERS_PER_SECOND: "Metres per second",
+    WindSpeedUnit.KILOMETERS_PER_HOUR: "Kilometres per hour",
+    WindSpeedUnit.MILES_PER_HOUR: "Miles per hour",
+    WindSpeedUnit.KNOTS: "Knots",
+    PressureUnit.HECTOPASCAL: "Hectopascals",
+    PressureUnit.MILLIBARS: "Millibars",
+    PressureUnit.INCHES_OF_MERCURY: "Inches of mercury",
+    PressureUnit.ATMOSPHERES: "Atmospheres",
+    DistanceUnit.KILOMETERS: "Kilometres",
+    DistanceUnit.MILES: "Miles",
+    DistanceUnit.METERS: "Metres",
+    DistanceUnit.FEET: "Feet",
+}
+
+_E = TypeVar("_E", bound=UnitEnum)
 
 
 def _parse_unit(enum_type: type[_E], value: Any, default: _E) -> _E:

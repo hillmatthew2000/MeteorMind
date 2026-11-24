@@ -1,6 +1,6 @@
 import pytest
 
-from meteormind.validation import InputValidator, safe_input
+from meteormind.validation import InputValidator
 
 
 class TestCityName:
@@ -84,24 +84,3 @@ class TestNumericInput:
         assert not validate("-1", allow_negative=False).is_valid
         assert not validate("abc").is_valid
         assert not validate("").is_valid
-
-
-class TestSafeInput:
-    def test_retries_until_valid(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        answers = iter(["", "Paris"])
-        monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-        assert safe_input("City: ", InputValidator.validate_city_name) == "Paris"
-        assert "cannot be empty" in capsys.readouterr().out
-
-    def test_gives_up_after_max_attempts(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("builtins.input", lambda _prompt: "123")
-        assert safe_input("City: ", InputValidator.validate_city_name, max_attempts=2) is None
-
-    def test_end_of_input_cancels(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def raise_eof(_prompt: str) -> str:
-            raise EOFError
-
-        monkeypatch.setattr("builtins.input", raise_eof)
-        assert safe_input("City: ", InputValidator.validate_city_name) is None
