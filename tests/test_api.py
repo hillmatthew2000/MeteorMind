@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 import pytest
 import requests
@@ -183,7 +184,7 @@ class TestForecast:
 
     def test_days_follow_the_locations_timezone(self):
         # 15:00 UTC on 23 Nov is already 24 Nov in Tokyo (UTC+9).
-        def item(ts: int, temp: float) -> dict:
+        def item(ts: int, temp: float) -> dict[str, Any]:
             return {
                 "dt": ts,
                 "main": {"temp": temp, "humidity": 50},

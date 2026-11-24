@@ -7,12 +7,13 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from tkinter import filedialog
 from typing import Any
 
 import pytest
 
 from meteormind.gui.theme import DARK, LIGHT, resolve_palette
-from meteormind.gui.widgets import weather_symbol
+from meteormind.gui.widgets import PlacePicker, weather_symbol
 from meteormind.gui.worker import BackgroundWorker
 from meteormind.preferences import Preferences
 from meteormind.service import WeatherService
@@ -20,6 +21,10 @@ from meteormind.storage import DataStore
 from meteormind.units import create_imperial_preferences
 
 from .test_service import FlakyProvider
+
+
+def unexpected(value: object) -> None:
+    pytest.fail(f"unexpected callback with {value!r}")
 
 
 class FakeScheduler:
@@ -59,8 +64,12 @@ class TestBackgroundWorker:
         scheduler = FakeScheduler()
         worker = BackgroundWorker(scheduler)
         seen: list[int] = []
+
+        def job(value: int) -> Callable[[], int]:
+            return lambda: value
+
         for n in range(5):
-            worker.submit(lambda n=n: n, seen.append, pytest.fail)
+            worker.submit(job(n), seen.append, unexpected)
         scheduler.run_until_idle(worker)
         assert seen == [0, 1, 2, 3, 4]
         worker.close()
@@ -73,8 +82,8 @@ class TestBackgroundWorker:
         def broken(_value: int) -> None:
             raise RuntimeError("bug")
 
-        worker.submit(lambda: 1, broken, pytest.fail)
-        worker.submit(lambda: 2, seen.append, pytest.fail)
+        worker.submit(lambda: 1, broken, unexpected)
+        worker.submit(lambda: 2, seen.append, unexpected)
         scheduler.run_until_idle(worker)
         assert seen == [2]
         worker.close()
@@ -83,7 +92,7 @@ class TestBackgroundWorker:
         scheduler = FakeScheduler()
         worker = BackgroundWorker(scheduler)
         worker.close()
-        worker.submit(lambda: 1, pytest.fail, pytest.fail)
+        worker.submit(lambda: 1, unexpected, unexpected)
         assert not worker.busy and not scheduler.calls
 
 
@@ -200,7 +209,6 @@ def test_invalid_and_unknown_places(app: Any) -> None:
 
 
 def test_place_picker(app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    from meteormind.gui import app as app_module
 
     offered: list[list[str]] = []
 
@@ -209,7 +217,7 @@ def test_place_picker(app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         self.destroy()
         return self.places[1]
 
-    monkeypatch.setattr(app_module.PlacePicker, "ask", pick)
+    monkeypatch.setattr(PlacePicker, "ask", pick)
     app.search_entry.set_value("Springfield")
     app.search()
     pump(app)
@@ -269,7 +277,7 @@ def test_reports(app: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert len(app.report.rows) == 2
 
     target = tmp_path / "report.csv"
-    monkeypatch.setattr(app_module.filedialog, "asksaveasfilename", lambda **_k: str(target))
+    monkeypatch.setattr(filedialog, "asksaveasfilename", lambda **_k: str(target))
     app.save_report()
     lines = target.read_text(encoding="utf-8").splitlines()
     assert lines[0].startswith("Date,Day,") and len(lines) == 3
@@ -278,7 +286,6 @@ def test_reports(app: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 def test_history_filter_and_export(
     app: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from meteormind.gui import app as app_module
 
     app.load_place(app.service.locate("Cairo"))
     pump(app)
@@ -287,7 +294,7 @@ def test_history_filter_and_export(
     app.history_filter.set_value("cairo")
     assert len(app.history_tree.get_children()) == 2
     target = tmp_path / "history.json"
-    monkeypatch.setattr(app_module.filedialog, "asksaveasfilename", lambda **_k: str(target))
+    monkeypatch.setattr(filedialog, "asksaveasfilename", lambda **_k: str(target))
     app.export_history()
     assert target.exists()
 

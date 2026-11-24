@@ -58,6 +58,7 @@ REPORT_LABELS = {
     "locations": "Most looked-up places",
     "history": "Recent queries",
 }
+WEATHER_TAB, HISTORY_TAB, REPORTS_TAB, SETTINGS_TAB = range(4)
 REPORTS_NEEDING_ONE_PLACE = {"forecast", "trends"}
 REPORTS_TAKING_PLACES = {"compare", "forecast-compare", "forecast", "trends"}
 
@@ -413,6 +414,9 @@ class MeteorMindApp:
     def toggle_theme(self) -> None:
         self.set_theme("light" if self.theme.palette.name == "dark" else "dark")
 
+    def show_tab(self, index: int) -> None:
+        self.tabs.select(index)  # type: ignore[no-untyped-call]  # unannotated in typeshed
+
     def _bind_shortcuts(self) -> None:
         bindings: dict[str, Callable[[], object]] = {
             "<Control-l>": self.focus_search,
@@ -426,7 +430,7 @@ class MeteorMindApp:
             "<Control-w>": self.close,
         }
         for number in range(1, 5):
-            bindings[f"<Control-Key-{number}>"] = partial(self.tabs.select, number - 1)
+            bindings[f"<Control-Key-{number}>"] = partial(self.show_tab, number - 1)
         for sequence, action in bindings.items():
             self.root.bind_all(sequence, self._shortcut(action))
 
@@ -439,7 +443,7 @@ class MeteorMindApp:
         return handler
 
     def focus_search(self) -> None:
-        self.tabs.select(0)
+        self.show_tab(WEATHER_TAB)
         self.search_entry.focus_set()
         self.search_entry.select_range(0, "end")
 
@@ -524,10 +528,10 @@ class MeteorMindApp:
         try:
             parse_place(query)
         except InputError as error:
-            self.tabs.select(0)
+            self.show_tab(WEATHER_TAB)
             self.weather_panel.show_error(str(error), error.suggestions, None)
             return
-        self.tabs.select(0)
+        self.show_tab(WEATHER_TAB)
         self._request += 1
         request = self._request
         self.weather_panel.show_loading(f"Looking for “{query}”…")
@@ -561,7 +565,7 @@ class MeteorMindApp:
         """Fetch and show current weather and the forecast for a place."""
         self._request += 1
         request = self._request
-        self.tabs.select(0)
+        self.show_tab(WEATHER_TAB)
         self.weather_panel.show_loading(f"Loading the weather for {location.display_name}…")
 
         def fetch() -> Shown:
@@ -655,7 +659,7 @@ class MeteorMindApp:
         if location is None:
             return
         if self.shown and self.shown.location.key == location.key and not self.worker.busy:
-            self.tabs.select(0)
+            self.show_tab(WEATHER_TAB)
             return
         self.load_place(location)
 
@@ -940,7 +944,7 @@ class MeteorMindApp:
         self.banner.grid(row=1, column=0, sticky="ew")
 
     def open_key_settings(self) -> None:
-        self.tabs.select(3)
+        self.show_tab(SETTINGS_TAB)
         self.key_entry.focus_set()
 
     def save_key(self) -> None:
@@ -988,7 +992,7 @@ class MeteorMindApp:
         folder = self.service.store.directory
         folder.mkdir(parents=True, exist_ok=True)
         if sys.platform == "win32":
-            os.startfile(folder)  # type: ignore[attr-defined]
+            os.startfile(folder)
         else:
             subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
 

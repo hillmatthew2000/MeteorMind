@@ -79,7 +79,7 @@ def system_prefers_dark() -> bool:
             value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
     except OSError:
         return False
-    return value == 0
+    return isinstance(value, int) and value == 0
 
 
 def resolve_palette(theme: str) -> Palette:

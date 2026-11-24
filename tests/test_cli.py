@@ -7,6 +7,7 @@ import pytest
 from meteormind import cli
 from meteormind.config import ConfigManager
 from meteormind.console import configure_stream, display_width, format_pairs, format_table
+from meteormind.service import WeatherService
 
 from .conftest import API_KEY
 
@@ -213,7 +214,12 @@ class TestEntryPoints:
 
     def test_gui_command_starts_gui(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[list[str]] = []
-        monkeypatch.setattr("meteormind.gui.main", lambda argv: calls.append(argv) or 0)
+
+        def fake_gui(argv: list[str]) -> int:
+            calls.append(argv)
+            return 0
+
+        monkeypatch.setattr("meteormind.gui.main", fake_gui)
         assert cli.main(["gui", "--demo"]) == 0
         assert cli.main(["--gui"]) == 0
         assert calls == [["--demo"], []]
@@ -224,7 +230,7 @@ class TestEntryPoints:
         def interrupt(*args: object) -> None:
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(cli.WeatherService, "locate", interrupt)
+        monkeypatch.setattr(WeatherService, "locate", interrupt)
         assert run(capsys, "--demo", "current", "London")[0] == cli.EXIT_INTERRUPTED
 
 
