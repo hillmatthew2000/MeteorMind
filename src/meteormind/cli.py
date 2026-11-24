@@ -88,19 +88,17 @@ def resolve_place(app: App, words: Sequence[str], pick: int | None = None) -> Lo
     if len(matches) == 1:
         return matches[0]
     if app.interactive:
-        return _ask_which(app, query, matches)
-    app.warn(
-        f"Note: '{query}' matches {len(matches)} places; using the first. Choose with --pick N:"
-    )
+        app.warn(f"Several places match '{query}':")
+    else:
+        app.warn(
+            f"Note: '{query}' matches {len(matches)} places; using the first. Choose with --pick N:"
+        )
     for line in numbered:
         app.warn(f"  {line}")
-    return matches[0]
+    return _ask_which(app, matches) if app.interactive else matches[0]
 
 
-def _ask_which(app: App, query: str, matches: Sequence[Location]) -> Location:
-    app.warn(f"Several places match '{query}':")
-    for n, location in enumerate(matches, 1):
-        app.warn(f"  {n}. {location.display_name}")
+def _ask_which(app: App, matches: Sequence[Location]) -> Location:
     while True:
         print(f"Which one? [1-{len(matches)}, Enter for 1]: ", end="", file=app.err, flush=True)
         answer = app.inp.readline()
