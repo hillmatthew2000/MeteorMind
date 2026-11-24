@@ -1,1 +1,2 @@
-requests>=2.25.1
+# Runtime dependencies. For development use: pip install -e ".[dev]"
+requests>=2.31,<3
