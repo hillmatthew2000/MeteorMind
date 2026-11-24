@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -17,7 +18,7 @@ from meteormind.gui.widgets import PlacePicker, weather_symbol
 from meteormind.gui.worker import BackgroundWorker
 from meteormind.preferences import Preferences
 from meteormind.service import WeatherService
-from meteormind.storage import DataStore
+from meteormind.storage import DataStore, StorageError
 from meteormind.units import create_imperial_preferences
 
 from .test_service import FlakyProvider
@@ -213,7 +214,6 @@ def test_invalid_and_unknown_places(app: Any) -> None:
 
 
 def test_place_picker(app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-
     offered: list[list[str]] = []
 
     def pick(self: Any) -> Any:
@@ -321,3 +321,38 @@ def test_close_destroys_the_window(app: Any) -> None:
     window = app.root
     app.close()
     assert not window.winfo_exists()
+
+
+def test_errors_in_event_handlers_are_shown_and_logged(
+    app: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from tkinter import messagebox
+
+    shown: list[str] = []
+    monkeypatch.setattr(
+        messagebox, "showerror", lambda _title, message, **_k: shown.append(message)
+    )
+    app.report_callback_exception(StorageError, StorageError("Could not save x"), None)
+    assert shown == ["Could not save x"] and not caplog.records
+
+    error = ZeroDivisionError("boom")
+    app.report_callback_exception(ZeroDivisionError, error, None)
+    assert shown[-1] == "Something went wrong: boom"
+    assert caplog.records[-1].exc_info is not None and caplog.records[-1].exc_info[1] is error
+
+
+def test_log_file(tmp_path: Path) -> None:
+    from meteormind.gui import _log_to_file
+
+    root_logger = logging.getLogger()
+    before = list(root_logger.handlers)
+    target = tmp_path / "data" / "meteormind.log"
+    _log_to_file(target)
+    added = [h for h in root_logger.handlers if h not in before]
+    try:
+        logging.getLogger("meteormind.test").error("disk on fire")
+    finally:
+        for handler in added:
+            root_logger.removeHandler(handler)
+            handler.close()
+    assert len(added) == 1 and "disk on fire" in target.read_text(encoding="utf-8")

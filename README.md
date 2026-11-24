@@ -180,7 +180,9 @@ kept in a per-user folder:
 
 Set `METEORMIND_HOME` to use a different folder. The files are plain JSON:
 `favorites.json`, `history.json`, `preferences.json`, `cache.json` and
-`config.json`, plus timestamped copies under `backups/`. Older versions
+`config.json`, plus timestamped copies under `backups/`. The desktop app
+also writes warnings and unexpected errors to `meteormind.log` there, which
+helps when reporting a problem. Older versions
 kept data in a `data` folder next to where they were started; it is copied
 across on first run and left in place.
 

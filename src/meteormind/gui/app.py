@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from types import TracebackType
 from typing import Literal, TypeVar
 
 from ..api import MAX_FORECAST_DAYS, APIError, MissingAPIKeyError
@@ -70,6 +72,9 @@ class Shown:
     location: Location
     weather: WeatherData
     forecast: list[ForecastData]
+
+
+logger = logging.getLogger(__name__)
 
 
 def describe(error: BaseException) -> tuple[str, list[str]]:
@@ -496,6 +501,8 @@ class MeteorMindApp:
             self.status.set("Ready")
 
     def show_error_dialog(self, error: BaseException) -> None:
+        if not isinstance(error, USER_ERRORS):
+            logger.error("Unexpected error", exc_info=error)
         message, suggestions = describe(error)
         messagebox.showerror("MeteorMind", message, detail="\n".join(suggestions), parent=self.root)
         self.status.set(message)
@@ -1032,6 +1039,15 @@ class MeteorMindApp:
         self.status.set("All data deleted")
 
     # Lifecycle -----------------------------------------------------------------
+
+    def report_callback_exception(
+        self,
+        exc_type: type[BaseException],
+        error: BaseException,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Tk calls this for errors in event handlers: show them rather than lose them."""
+        self.show_error_dialog(error)
 
     def close(self) -> None:
         self.worker.close()
