@@ -271,7 +271,8 @@ def test_reports(app: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     target = tmp_path / "report.csv"
     monkeypatch.setattr(app_module.filedialog, "asksaveasfilename", lambda **_k: str(target))
     app.save_report()
-    assert target.read_text(encoding="utf-8").count("Cairo") >= 1
+    lines = target.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("Date,Day,") and len(lines) == 3
 
 
 def test_history_filter_and_export(

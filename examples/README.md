@@ -1,30 +1,27 @@
-# 📊 MeteorMind Examples
+# Examples
 
-This directory contains demonstration files and sample outputs from the MeteorMind weather reporting system.
+`reports/` holds one sample of every report MeteorMind can build, made from
+the offline demo data:
 
-## 📁 Contents
+| File | Command that builds the same kind of report |
+| --- | --- |
+| `compare.txt`, `.csv`, `.json` | `meteormind report compare London Paris Tokyo "New York" Sydney` |
+| `forecast.txt` (imperial units) | `meteormind --units imperial report forecast London --days 5` |
+| `forecast-compare.txt`, `.csv` | `meteormind report forecast-compare London Paris Tokyo --days 3` |
+| `trends.txt` | `meteormind report trends London` |
+| `locations.txt` | `meteormind report locations` |
+| `history.txt` | `meteormind report history` |
 
-### 🐍 Demo Script
-- `demo_reporting.py` - Comprehensive demonstration of all reporting features
+Add `--demo` to any of these to try them without an API key, and
+`-o FILE` (`.txt`, `.csv` or `.json`) to save instead of print.
 
-### 📈 Sample Reports (Generated: 2025-09-17 16:09:07)
-- **Current Weather Reports**: Multi-city comparison data
-- **Forecast Reports**: 5-day weather predictions
-- **Query History Reports**: Usage analytics and patterns  
-- **Location Statistics**: Most queried locations and trends
-- **Temperature Trends**: Historical temperature analysis
-
-### 📄 Export Formats
-Each report type is available in three formats:
-- `.txt` - Human-readable formatted tables
-- `.csv` - Spreadsheet-compatible data
-- `.json` - Structured data for applications
-
-## 🚀 Running the Demo
+The samples use a fixed date and clock, so regenerating them gives
+identical files:
 
 ```bash
-cd examples
-python demo_reporting.py
+python examples/sample_reports.py           # rewrite examples/reports
+python examples/sample_reports.py OUT_DIR   # or write them elsewhere
 ```
 
-This will generate fresh sample reports with current timestamps and demonstrate all reporting capabilities without requiring an API key or network connection.
+The test suite fails if the committed samples and the script's output
+drift apart, so rerun it after changing how reports look.

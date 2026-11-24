@@ -54,7 +54,8 @@ def format_table(
     """Render rows as aligned columns separated by two spaces.
 
     ``align`` gives one character per column, ``<`` or ``>``; columns without
-    one are left-aligned. Cells may contain line breaks.
+    one are left-aligned. Cells may contain line breaks; when any row spans
+    several lines, rows are separated by blank lines so they stay distinct.
     """
     split_rows = [[str(cell).splitlines() or [""] for cell in row] for row in rows]
     widths = [display_width(h) for h in headers]
@@ -68,7 +69,10 @@ def format_table(
         return (indent + "  ".join(parts)).rstrip()
 
     lines = [render(headers), indent + "  ".join("-" * w for w in widths)]
-    for row in split_rows:
+    spaced = any(len(cell) > 1 for row in split_rows for cell in row)
+    for index, row in enumerate(split_rows):
+        if spaced and index:
+            lines.append("")
         height = max(len(cell) for cell in row)
         for n in range(height):
             lines.append(render([cell[n] if n < len(cell) else "" for cell in row]))
