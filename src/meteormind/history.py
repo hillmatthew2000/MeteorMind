@@ -1,521 +1,140 @@
-"""
-Historical weather query management and caching system.
+"""The query history: what was looked up, when, and what the weather was.
 
-This module handles:
-- Storage and retrieval of recent weather queries
-- Query history with timestamps
-- Smart caching to reduce API calls
-- Query statistics and analytics
+API responses are cached by :class:`meteormind.cache.ResponseCache` inside
+the weather client; this module only records queries for the History view
+and the reports.
 """
+
+from __future__ import annotations
 
 import json
-from collections import defaultdict
-from datetime import datetime, timedelta
-from typing import Any
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from pathlib import Path
 
-from .models import ForecastData, Location, WeatherData, WeatherQuery
-from .storage import DataManager
+from .models import Location, WeatherData, WeatherQuery
+from .storage import DataStore, StorageError
+
+
+@dataclass(frozen=True)
+class HistoryStatistics:
+    """Summary of the query history."""
+
+    total_queries: int = 0
+    first_query: datetime | None = None
+    last_query: datetime | None = None
+    top_locations: list[tuple[str, int]] = field(default_factory=list)
+    query_types: dict[str, int] = field(default_factory=dict)
+    queries_by_day: dict[date, int] = field(default_factory=dict)
+
+    @property
+    def unique_locations(self) -> int:
+        return len(self.top_locations)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "total_queries": self.total_queries,
+            "first_query": self.first_query.isoformat() if self.first_query else None,
+            "last_query": self.last_query.isoformat() if self.last_query else None,
+            "top_locations": [list(item) for item in self.top_locations],
+            "query_types": self.query_types,
+            "queries_by_day": {day.isoformat(): n for day, n in self.queries_by_day.items()},
+        }
 
 
 class HistoryManager:
-    """
-    Manages historical weather queries and provides caching functionality.
+    """Keeps the most recent ``limit`` queries, oldest first, saved after each change."""
 
-    Features:
-    - Query history tracking with timestamps
-    - Smart caching to reduce API calls
-    - Query analytics and statistics
-    - Automatic cleanup of old queries
-    - Search functionality within history
-    """
+    def __init__(
+        self,
+        store: DataStore,
+        limit: int = 100,
+        clock: Callable[[], datetime] = datetime.now,
+    ) -> None:
+        self.store = store
+        self.limit = limit
+        self._clock = clock
+        self.queries: list[WeatherQuery] = store.load_history(now=clock())[-limit:]
 
-    def __init__(self, data_manager: DataManager):
-        """
-        Initialize the history manager.
-
-        Args:
-            data_manager: DataManager instance for persistence
-        """
-        self.data_manager = data_manager
-        self.recent_queries: list[WeatherQuery] = []
-        self.cache: dict[str, Any] = {}
-        self.max_queries = 100
-        self.cache_duration = timedelta(minutes=10)
-
-        # Load existing data
-        self._load_history()
-        self._load_cache()
-
-    def _load_history(self) -> None:
-        """Load query history from storage."""
-        try:
-            self.recent_queries = self.data_manager.load_recent_queries()
-            print(f"Loaded {len(self.recent_queries)} historical queries")
-        except Exception as e:
-            print(f"Error loading query history: {e}")
-            self.recent_queries = []
-
-    def _load_cache(self) -> None:
-        """Load cache from storage."""
-        try:
-            self.cache = self.data_manager.load_weather_cache()
-            # Clean expired cache entries
-            self._clean_expired_cache()
-        except Exception as e:
-            print(f"Error loading cache: {e}")
-            self.cache = {}
-
-    def _save_history(self) -> None:
-        """Save query history to storage."""
-        try:
-            self.data_manager.save_recent_queries(self.recent_queries)
-        except Exception as e:
-            print(f"Error saving query history: {e}")
-
-    def _save_cache(self) -> None:
-        """Save cache to storage."""
-        try:
-            self.data_manager.save_weather_cache(self.cache)
-        except Exception as e:
-            print(f"Error saving cache: {e}")
-
-    def _generate_cache_key(self, location: Location, query_type: str) -> str:
-        """
-        Generate a unique cache key for a location and query type.
-
-        Args:
-            location: Location object
-            query_type: Type of query ('current', 'forecast', etc.)
-
-        Returns:
-            Unique cache key string
-        """
-        return f"{location.city}_{location.country}_{query_type}_{location.latitude:.2f}_{location.longitude:.2f}"
-
-    def _clean_expired_cache(self) -> None:
-        """Remove expired entries from cache."""
-        current_time = datetime.now()
-        expired_keys = []
-
-        for key, cached_data in self.cache.items():
-            if "timestamp" in cached_data:
-                cache_time = datetime.fromisoformat(cached_data["timestamp"])
-                if current_time - cache_time > self.cache_duration:
-                    expired_keys.append(key)
-
-        for key in expired_keys:
-            del self.cache[key]
-
-        if expired_keys:
-            print(f"Cleaned {len(expired_keys)} expired cache entries")
-            self._save_cache()
+    def __len__(self) -> int:
+        return len(self.queries)
 
     def add_query(
         self,
         location: Location,
         weather_data: WeatherData | None = None,
         query_type: str = "current",
-    ) -> None:
-        """
-        Add a new query to the history.
+    ) -> WeatherQuery:
+        """Record a query and save the history. Raises :class:`StorageError`."""
+        query = WeatherQuery(location, self._clock(), weather_data, query_type)
+        self.queries.append(query)
+        del self.queries[: -self.limit]
+        self.store.save_history(self.queries)
+        return query
 
-        Args:
-            location: Location that was queried
-            weather_data: Weather data retrieved (if any)
-            query_type: Type of query performed
-        """
-        query = WeatherQuery(
-            location=location,
-            query_time=datetime.now(),
-            weather_data=weather_data,
-            query_type=query_type,
+    def set_limit(self, limit: int) -> None:
+        self.limit = limit
+        if len(self.queries) > limit:
+            del self.queries[:-limit]
+            self.store.save_history(self.queries)
+
+    def get_recent_queries(self, limit: int | None = None) -> list[WeatherQuery]:
+        """The most recent queries, newest first."""
+        newest_first = self.queries[::-1]
+        return newest_first if limit is None else newest_first[:limit]
+
+    def search_queries(self, term: str, limit: int | None = None) -> list[WeatherQuery]:
+        """Queries whose city, region or country contains ``term``, newest first."""
+        needle = term.strip().casefold()
+        matches = [
+            q
+            for q in self.get_recent_queries()
+            if needle in q.location.display_name.casefold()
+            or needle == q.location.country.casefold()
+        ]
+        return matches if limit is None else matches[:limit]
+
+    def observations_for(self, city: str, country: str | None = None) -> list[WeatherQuery]:
+        """Current-weather queries for a place, oldest first, for trend reports."""
+        return [
+            q
+            for q in self.queries
+            if q.weather_data is not None
+            and q.location.city.casefold() == city.casefold()
+            and (not country or q.location.country.casefold() == country.casefold())
+        ]
+
+    def get_query_statistics(self) -> HistoryStatistics:
+        if not self.queries:
+            return HistoryStatistics()
+        places = Counter(q.location.display_name for q in self.queries)
+        return HistoryStatistics(
+            total_queries=len(self.queries),
+            first_query=min(q.query_time for q in self.queries),
+            last_query=max(q.query_time for q in self.queries),
+            top_locations=places.most_common(),
+            query_types=dict(Counter(q.query_type for q in self.queries)),
+            queries_by_day=dict(sorted(Counter(q.query_time.date() for q in self.queries).items())),
         )
 
-        self.recent_queries.append(query)
+    def clear_history(self) -> None:
+        self.queries.clear()
+        self.store.save_history(self.queries)
 
-        # Trim to max queries
-        if len(self.recent_queries) > self.max_queries:
-            self.recent_queries = self.recent_queries[-self.max_queries :]
-
-        # Save to storage
-        self._save_history()
-
-    def cache_weather_data(
-        self, location: Location, weather_data: WeatherData, query_type: str = "current"
-    ) -> None:
-        """
-        Cache weather data for a location.
-
-        Args:
-            location: Location for the data
-            weather_data: Weather data to cache
-            query_type: Type of query
-        """
-        cache_key = self._generate_cache_key(location, query_type)
-
-        cache_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "data": weather_data.to_dict(),
-            "location": location.to_dict(),
-            "query_type": query_type,
+    def export_history(self, path: Path | str) -> Path:
+        """Write the history and its statistics to a JSON file. Raises :class:`StorageError`."""
+        target = Path(path)
+        document = {
+            "exported_at": self._clock().isoformat(timespec="seconds"),
+            "statistics": self.get_query_statistics().to_dict(),
+            "queries": [q.to_dict() for q in self.get_recent_queries()],
         }
-
-        self.cache[cache_key] = cache_entry
-        self._save_cache()
-
-    def cache_forecast_data(self, location: Location, forecast_data: list[ForecastData]) -> None:
-        """
-        Cache forecast data for a location.
-
-        Args:
-            location: Location for the forecast
-            forecast_data: List of forecast data to cache
-        """
-        cache_key = self._generate_cache_key(location, "forecast")
-
-        cache_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "data": [forecast.to_dict() for forecast in forecast_data],
-            "location": location.to_dict(),
-            "query_type": "forecast",
-        }
-
-        self.cache[cache_key] = cache_entry
-        self._save_cache()
-
-    def get_cached_weather(
-        self, location: Location, query_type: str = "current"
-    ) -> WeatherData | None:
-        """
-        Get cached weather data for a location if available and not expired.
-
-        Args:
-            location: Location to check
-            query_type: Type of query
-
-        Returns:
-            WeatherData if cached and valid, None otherwise
-        """
-        cache_key = self._generate_cache_key(location, query_type)
-
-        if cache_key in self.cache:
-            cached_data = self.cache[cache_key]
-            cache_time = datetime.fromisoformat(cached_data["timestamp"])
-
-            if datetime.now() - cache_time <= self.cache_duration:
-                try:
-                    return WeatherData.from_dict(cached_data["data"])
-                except (KeyError, ValueError) as e:
-                    print(f"Error parsing cached weather data: {e}")
-                    del self.cache[cache_key]
-
-        return None
-
-    def get_cached_forecast(self, location: Location) -> list[ForecastData] | None:
-        """
-        Get cached forecast data for a location if available and not expired.
-
-        Args:
-            location: Location to check
-
-        Returns:
-            List of ForecastData if cached and valid, None otherwise
-        """
-        cache_key = self._generate_cache_key(location, "forecast")
-
-        if cache_key in self.cache:
-            cached_data = self.cache[cache_key]
-            cache_time = datetime.fromisoformat(cached_data["timestamp"])
-
-            if datetime.now() - cache_time <= self.cache_duration:
-                try:
-                    forecast_list = []
-                    for forecast_dict in cached_data["data"]:
-                        forecast_list.append(ForecastData.from_dict(forecast_dict))
-                    return forecast_list
-                except (KeyError, ValueError) as e:
-                    print(f"Error parsing cached forecast data: {e}")
-                    del self.cache[cache_key]
-
-        return None
-
-    def get_recent_queries(self, limit: int = 20) -> list[WeatherQuery]:
-        """
-        Get recent queries.
-
-        Args:
-            limit: Maximum number of queries to return
-
-        Returns:
-            List of recent WeatherQuery objects
-        """
-        return self.recent_queries[-limit:] if self.recent_queries else []
-
-    def get_queries_for_location(self, location: Location, limit: int = 10) -> list[WeatherQuery]:
-        """
-        Get queries for a specific location.
-
-        Args:
-            location: Location to search for
-            limit: Maximum number of queries to return
-
-        Returns:
-            List of WeatherQuery objects for the location
-        """
-        matching_queries = []
-
-        for query in reversed(self.recent_queries):
-            if (
-                query.location.city.lower() == location.city.lower()
-                and query.location.country.lower() == location.country.lower()
-            ):
-                matching_queries.append(query)
-                if len(matching_queries) >= limit:
-                    break
-
-        return matching_queries
-
-    def get_queries_by_date(self, start_date: datetime, end_date: datetime) -> list[WeatherQuery]:
-        """
-        Get queries within a date range.
-
-        Args:
-            start_date: Start of date range
-            end_date: End of date range
-
-        Returns:
-            List of WeatherQuery objects within the date range
-        """
-        matching_queries = []
-
-        for query in self.recent_queries:
-            if start_date <= query.query_time <= end_date:
-                matching_queries.append(query)
-
-        return sorted(matching_queries, key=lambda q: q.query_time, reverse=True)
-
-    def search_queries(self, search_term: str, limit: int = 20) -> list[WeatherQuery]:
-        """
-        Search queries by city name or country.
-
-        Args:
-            search_term: Term to search for
-            limit: Maximum number of results
-
-        Returns:
-            List of matching WeatherQuery objects
-        """
-        search_term = search_term.lower()
-        matching_queries = []
-
-        for query in reversed(self.recent_queries):
-            if (
-                search_term in query.location.city.lower()
-                or search_term in query.location.country.lower()
-            ):
-                matching_queries.append(query)
-                if len(matching_queries) >= limit:
-                    break
-
-        return matching_queries
-
-    def get_query_statistics(self) -> dict[str, Any]:
-        """
-        Get statistics about query history.
-
-        Returns:
-            Dictionary with query statistics
-        """
-        if not self.recent_queries:
-            return {
-                "total_queries": 0,
-                "date_range": None,
-                "most_queried_locations": [],
-                "query_types": {},
-                "queries_by_day": {},
-                "cache_stats": self._get_cache_statistics(),
-            }
-
-        # Basic stats
-        total_queries = len(self.recent_queries)
-        first_query = min(self.recent_queries, key=lambda q: q.query_time)
-        last_query = max(self.recent_queries, key=lambda q: q.query_time)
-
-        # Location frequency
-        location_counts = defaultdict(int)
-        for query in self.recent_queries:
-            location_key = f"{query.location.city}, {query.location.country}"
-            location_counts[location_key] += 1
-
-        # Query type frequency
-        type_counts = defaultdict(int)
-        for query in self.recent_queries:
-            type_counts[query.query_type] += 1
-
-        # Queries by day
-        day_counts = defaultdict(int)
-        for query in self.recent_queries:
-            day_key = query.query_time.date().isoformat()
-            day_counts[day_key] += 1
-
-        return {
-            "total_queries": total_queries,
-            "date_range": {
-                "first_query": first_query.query_time.isoformat(),
-                "last_query": last_query.query_time.isoformat(),
-                "days_span": (last_query.query_time.date() - first_query.query_time.date()).days,
-            },
-            "most_queried_locations": sorted(
-                [(location, count) for location, count in location_counts.items()],
-                key=lambda x: x[1],
-                reverse=True,
-            )[:10],
-            "query_types": dict(type_counts),
-            "queries_by_day": dict(day_counts),
-            "cache_stats": self._get_cache_statistics(),
-        }
-
-    def _get_cache_statistics(self) -> dict[str, Any]:
-        """Get cache statistics."""
-        current_time = datetime.now()
-        valid_entries = 0
-        expired_entries = 0
-
-        for cached_data in self.cache.values():
-            if "timestamp" in cached_data:
-                cache_time = datetime.fromisoformat(cached_data["timestamp"])
-                if current_time - cache_time <= self.cache_duration:
-                    valid_entries += 1
-                else:
-                    expired_entries += 1
-
-        return {
-            "total_entries": len(self.cache),
-            "valid_entries": valid_entries,
-            "expired_entries": expired_entries,
-            "cache_duration_minutes": self.cache_duration.total_seconds() / 60,
-        }
-
-    def clear_history(self) -> bool:
-        """
-        Clear all query history.
-
-        Returns:
-            True if successful, False otherwise
-        """
         try:
-            self.recent_queries = []
-            self._save_history()
-            print("Query history cleared")
-            return True
-        except Exception as e:
-            print(f"Error clearing history: {e}")
-            return False
-
-    def clear_cache(self) -> bool:
-        """
-        Clear all cached data.
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            self.cache = {}
-            self.data_manager.clear_weather_cache()
-            print("Cache cleared")
-            return True
-        except Exception as e:
-            print(f"Error clearing cache: {e}")
-            return False
-
-    def export_history(self, filepath: str) -> bool:
-        """
-        Export query history to a JSON file.
-
-        Args:
-            filepath: Path to save the export
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            export_data = {
-                "export_date": datetime.now().isoformat(),
-                "total_queries": len(self.recent_queries),
-                "queries": [query.to_dict() for query in self.recent_queries],
-                "statistics": self.get_query_statistics(),
-            }
-
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(export_data, f, indent=2, default=str)
-
-            print(f"History exported to: {filepath}")
-            return True
-
-        except Exception as e:
-            print(f"Error exporting history: {e}")
-            return False
-
-    def print_recent_queries(self, limit: int = 10) -> None:
-        """Print recent queries in a formatted way."""
-        recent = self.get_recent_queries(limit)
-
-        if not recent:
-            print("No recent queries found.")
-            return
-
-        print(f"\n📊 Recent Queries (Last {len(recent)}):")
-        print("=" * 60)
-
-        for i, query in enumerate(reversed(recent), 1):
-            time_str = query.query_time.strftime("%Y-%m-%d %H:%M:%S")
-            location_str = f"{query.location.city}, {query.location.country}"
-
-            print(f"{i:2d}. {time_str} | {location_str:25s} | {query.query_type}")
-
-            if query.weather_data:
-                temp = query.weather_data.temperature
-                desc = query.weather_data.description
-                print(f"     └── {temp}°C, {desc}")
-
-    def print_statistics(self) -> None:
-        """Print query statistics in a formatted way."""
-        stats = self.get_query_statistics()
-
-        print("\n📈 Query Statistics:")
-        print("=" * 40)
-
-        if stats["total_queries"] == 0:
-            print("No queries recorded yet.")
-            return
-
-        print(f"Total Queries: {stats['total_queries']}")
-
-        if stats["date_range"]:
-            print(
-                f"Date Range: {stats['date_range']['first_query'][:10]} to {stats['date_range']['last_query'][:10]}"
+            target.write_text(
+                json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
             )
-            print(f"Days Active: {stats['date_range']['days_span']}")
-
-        print("\nMost Queried Locations:")
-        for location, count in stats["most_queried_locations"][:5]:
-            print(f"  {location}: {count} queries")
-
-        print(f"\nQuery Types: {stats['query_types']}")
-
-        cache_stats = stats["cache_stats"]
-        print(
-            f"\nCache: {cache_stats['valid_entries']} valid, {cache_stats['expired_entries']} expired"
-        )
-
-
-if __name__ == "__main__":
-    # Test the history manager
-    from .storage import DataManager
-
-    dm = DataManager()
-    hm = HistoryManager(dm)
-
-    # Print statistics
-    hm.print_statistics()
-    hm.print_recent_queries()
+        except OSError as exc:
+            raise StorageError(f"Could not write {target}: {exc.strerror or exc}") from exc
+        return target

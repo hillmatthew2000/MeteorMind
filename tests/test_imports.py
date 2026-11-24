@@ -15,6 +15,7 @@ MODULES = [
     "meteormind.jsonio",
     "meteormind.models",
     "meteormind.paths",
+    "meteormind.preferences",
     "meteormind.reporting",
     "meteormind.storage",
     "meteormind.units",

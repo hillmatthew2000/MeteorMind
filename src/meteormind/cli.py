@@ -12,17 +12,18 @@ This module provides a clear, numbered menu-driven interface that allows users t
 
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from .api import APIError, WeatherAPIHandler, describe_error
+from .cache import ResponseCache
 from .config import ConfigError, ConfigManager
 from .history import HistoryManager
 
 # Import our custom modules
 from .models import FavoriteLocationsLinkedList, Location, WeatherData
 from .reporting import WeatherReportGenerator
-from .storage import DataManager
+from .storage import DataStore, StorageError, format_file_size, migrate_legacy_data
 from .units import (
-    UnitPreferences,
     WeatherFormatter,
     create_imperial_preferences,
     create_metric_preferences,
@@ -46,27 +47,15 @@ class WeatherCLI:
     def __init__(self):
         """Initialize the CLI application."""
         self.running = True
-        self.data_manager = DataManager()
-        self.history_manager = HistoryManager(self.data_manager)
+        self.data_manager = DataStore()
+        migrate_legacy_data(Path.cwd() / "data", self.data_manager.directory)
+        self.preferences = self.data_manager.load_preferences()
+        self.history_manager = HistoryManager(self.data_manager, self.preferences.history_limit)
         self.config_manager = ConfigManager()
-
-        # Load user preferences
-        user_prefs = self.data_manager.get_user_preferences()
-        unit_prefs_data = user_prefs.get("units", {})
-
-        # Create unit preferences
-        if isinstance(unit_prefs_data, str):
-            # Handle legacy string format
-            if unit_prefs_data == "imperial":
-                self.unit_preferences = create_imperial_preferences()
-            else:
-                self.unit_preferences = create_metric_preferences()
-        else:
-            # Handle new dict format
-            try:
-                self.unit_preferences = UnitPreferences.from_dict(unit_prefs_data)
-            except (KeyError, ValueError):
-                self.unit_preferences = create_metric_preferences()
+        self.unit_preferences = self.preferences.units
+        self.cache = ResponseCache(
+            self.data_manager.cache_file, ttl_seconds=self.preferences.cache_seconds
+        )
 
         self.formatter = WeatherFormatter(self.unit_preferences)
         self.report_generator = WeatherReportGenerator(self.formatter)
@@ -86,7 +75,7 @@ class WeatherCLI:
             True if successful, False otherwise
         """
         try:
-            self.api_handler = WeatherAPIHandler()
+            self.api_handler = WeatherAPIHandler(cache=self.cache)
             return True
         except APIError as e:
             print(f"⚠️  API Configuration Issue: {e}")
@@ -202,20 +191,8 @@ class WeatherCLI:
         try:
             print(f"🔍 Fetching weather for {city}" + (f", {country}" if country else "") + "...")
 
-            # Check cache first
-            if country:
-                temp_location = Location(city, country, 0, 0)
-                cached_weather = self.history_manager.get_cached_weather(temp_location)
-                if cached_weather:
-                    print("📦 Using cached data...")
-                    self.display_weather_data(cached_weather, temp_location)
-                    return
-
-            # Fetch from API
+            # Fetch from API (recent responses come from the cache)
             weather_data, location = self.api_handler.get_current_weather_by_name(city, country)
-
-            # Cache the data
-            self.history_manager.cache_weather_data(location, weather_data)
 
             # Add to query history
             self.history_manager.add_query(location, weather_data, "current")
@@ -304,9 +281,6 @@ class WeatherCLI:
             )
 
             forecast_data, location = self.api_handler.get_forecast_by_name(city, country, days)
-
-            # Cache the data
-            self.history_manager.cache_forecast_data(location, forecast_data)
 
             # Add to query history
             self.history_manager.add_query(location, None, "forecast")
@@ -533,22 +507,10 @@ class WeatherCLI:
         try:
             print(f"🔍 Fetching weather for {location}...")
 
-            # Check cache first
-            cached_weather = self.history_manager.get_cached_weather(location)
-            if cached_weather:
-                print("📦 Using cached data...")
-                self.display_weather_data(cached_weather, location)
-
-                # Move to front of favorites (most recently accessed)
-                self.favorite_locations.move_to_front(location.city, location.country)
-                self.data_manager.save_favorite_locations(self.favorite_locations)
-                return
-
-            # Fetch from API
+            # Fetch from API (recent responses come from the cache)
             weather_data = self.api_handler.get_current_weather(location)
 
-            # Cache and track
-            self.history_manager.cache_weather_data(location, weather_data)
+            # Track
             self.history_manager.add_query(location, weather_data, "current")
 
             # Display weather
@@ -610,11 +572,16 @@ class WeatherCLI:
         print("\n📊 QUERY HISTORY & STATISTICS")
         print("=" * 50)
 
-        # Print recent queries
-        self.history_manager.print_recent_queries(15)
-
-        # Print statistics
-        self.history_manager.print_statistics()
+        recent = self.history_manager.get_recent_queries(15)
+        if not recent:
+            print("No recent queries found.")
+        for i, query in enumerate(recent, 1):
+            time_str = query.query_time.strftime("%Y-%m-%d %H:%M")
+            print(f"{i:2d}. {time_str} | {query.location!s:25s} | {query.query_type}")
+            if query.weather_data:
+                temp = self.formatter.format_temperature(query.weather_data.temperature)
+                print(f"     {temp}, {query.weather_data.description}")
+        print(f"\nTotal queries: {len(self.history_manager)}")
 
         # Options for history management
         print("\nHistory Options:")
@@ -639,10 +606,12 @@ class WeatherCLI:
         if not filepath:
             filepath = filename
 
-        if self.history_manager.export_history(filepath):
-            print(f"✅ History exported to: {filepath}")
-        else:
-            print("❌ Failed to export history.")
+        try:
+            path = self.history_manager.export_history(filepath)
+        except StorageError as e:
+            print(f"❌ {e}")
+            return
+        print(f"✅ History exported to: {path}")
 
     def clear_history(self) -> None:
         """Clear query history with confirmation."""
@@ -652,10 +621,8 @@ class WeatherCLI:
             .strip()
         )
         if confirm in ["y", "yes"]:
-            if self.history_manager.clear_history():
-                print("✅ Query history cleared.")
-            else:
-                print("❌ Failed to clear history.")
+            self.history_manager.clear_history()
+            print("✅ Query history cleared.")
         else:
             print("❌ History clearing cancelled.")
 
@@ -733,9 +700,8 @@ class WeatherCLI:
 
     def save_preferences(self) -> None:
         """Save current preferences to storage."""
-        user_prefs = self.data_manager.get_user_preferences()
-        user_prefs["units"] = self.unit_preferences.to_dict()
-        self.data_manager.save_user_preferences(user_prefs)
+        self.preferences.units = self.unit_preferences
+        self.data_manager.save_preferences(self.preferences)
 
     def quick_unit_presets(self) -> None:
         """Set quick unit presets (metric/imperial)."""
@@ -766,9 +732,7 @@ class WeatherCLI:
 
         # Show data statistics
         print("\n" + "=" * 40)
-        from .storage import print_data_statistics
-
-        print_data_statistics(self.data_manager)
+        self.print_data_statistics()
 
         # Show configuration status
         print("\n" + "=" * 40)
@@ -778,10 +742,8 @@ class WeatherCLI:
         """Clear weather data cache."""
         confirm = input("❓ Clear weather cache? (y/N): ").lower().strip()
         if confirm in ["y", "yes"]:
-            if self.history_manager.clear_cache():
-                print("✅ Cache cleared successfully.")
-            else:
-                print("❌ Failed to clear cache.")
+            self.cache.clear()
+            print("✅ Cache cleared successfully.")
         else:
             print("❌ Cache clearing cancelled.")
 
@@ -797,14 +759,9 @@ class WeatherCLI:
         choice = self.get_menu_choice(4)
 
         if choice == 1:
-            if self.data_manager.backup_all_data():
-                print("✅ Data backup created successfully.")
-            else:
-                print("❌ Failed to create backup.")
+            self._export_all_data()
         elif choice == 2:
-            from .storage import print_data_statistics
-
-            print_data_statistics(self.data_manager)
+            self.print_data_statistics()
         elif choice == 3:
             self.clear_all_data()
 
@@ -828,17 +785,13 @@ class WeatherCLI:
             return
 
         try:
-            # Clear favorites
+            self.data_manager.clear_all()
+            self.cache.clear()
             self.favorite_locations = FavoriteLocationsLinkedList()
-            self.data_manager.save_favorite_locations(self.favorite_locations)
-
-            # Clear history and cache
-            self.history_manager.clear_history()
-            self.history_manager.clear_cache()
-
-            # Reset preferences
-            self.unit_preferences = create_metric_preferences()
-            self.save_preferences()
+            self.history_manager.queries.clear()
+            self.preferences = self.data_manager.load_preferences()
+            self.unit_preferences = self.preferences.units
+            self.formatter = WeatherFormatter(self.unit_preferences)
 
             print("✅ All application data has been cleared.")
 
@@ -879,7 +832,7 @@ TROUBLESHOOTING:
 • "Network error": Check your internet connection
 
 DATA STORAGE:
-• All data is stored locally in the 'data' folder
+• All data is stored in your user profile (see Settings)
 • Favorites, history, and preferences are automatically saved
 • Use 'Data Management' to backup or clear data
 
@@ -1111,9 +1064,6 @@ For more help, visit: https://openweathermap.org/api
                 )
                 locations_data.append((location, weather_data))
 
-                # Cache the data
-                self.history_manager.cache_weather_data(location, weather_data)
-
             except Exception as e:
                 print(f"    ⚠️  Failed to fetch {location.city}: {e}")
 
@@ -1168,8 +1118,6 @@ For more help, visit: https://openweathermap.org/api
             )
             print("\n" + report.to_table_string())
 
-            # Cache the data
-            self.history_manager.cache_forecast_data(location, forecast_data)
             self.history_manager.add_query(location, None, "forecast")
 
             # Ask if user wants to export
@@ -1317,8 +1265,6 @@ For more help, visit: https://openweathermap.org/api
                 weather_data, location = self.api_handler.get_current_weather_by_name(city, country)
                 locations_data.append((location, weather_data))
 
-                # Cache and track
-                self.history_manager.cache_weather_data(location, weather_data)
                 self.history_manager.add_query(location, weather_data, "current")
 
             except Exception as e:
@@ -1363,8 +1309,6 @@ For more help, visit: https://openweathermap.org/api
                 forecast_data, location = self.api_handler.get_forecast_by_name(city, country, 5)
                 forecasts_data.append((location, forecast_data))
 
-                # Cache the data
-                self.history_manager.cache_forecast_data(location, forecast_data)
                 self.history_manager.add_query(location, None, "forecast")
 
             except Exception as e:
@@ -1440,24 +1384,19 @@ For more help, visit: https://openweathermap.org/api
 
         stats = self.history_manager.get_query_statistics()
 
-        print(f"Total Queries: {stats['total_queries']}")
-        print(f"Unique Locations: {len(stats.get('unique_locations', []))}")
+        print(f"Total Queries: {stats.total_queries}")
+        print(f"Unique Locations: {stats.unique_locations}")
 
-        if stats.get("most_queried_locations"):
+        if stats.top_locations:
             print("\n🏆 Most Queried Locations:")
-            for i, (location, count) in enumerate(stats["most_queried_locations"][:10], 1):
+            for i, (location, count) in enumerate(stats.top_locations[:10], 1):
                 print(f"  {i:2d}. {location}: {count} queries")
 
-        cache_stats = stats.get("cache_stats", {})
-        if cache_stats:
-            print("\n💾 Cache Statistics:")
-            print(f"  Valid Entries: {cache_stats.get('valid_entries', 0)}")
-            print(f"  Expired Entries: {cache_stats.get('expired_entries', 0)}")
-            print(f"  Cache Hit Rate: {cache_stats.get('hit_rate', 0):.1f}%")
+        print(f"\n💾 Cached responses: {len(self.cache)}")
 
-        if stats.get("query_types"):
+        if stats.query_types:
             print("\n📊 Query Types:")
-            for query_type, count in stats["query_types"].items():
+            for query_type, count in stats.query_types.items():
                 print(f"  {query_type.title()}: {count}")
 
         print("\n" + "=" * 50)
@@ -1500,10 +1439,8 @@ For more help, visit: https://openweathermap.org/api
         """Export recent queries to JSON."""
         try:
             filename = f"weather_queries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            if self.history_manager.export_history(filename):
-                print(f"✅ Recent queries exported to: {filename}")
-            else:
-                print("❌ Failed to export queries.")
+            self.history_manager.export_history(filename)
+            print(f"✅ Recent queries exported to: {filename}")
         except Exception as e:
             print(f"❌ Error exporting queries: {e}")
 
@@ -1533,7 +1470,7 @@ For more help, visit: https://openweathermap.org/api
             import json
 
             with open(filename, "w", encoding="utf-8") as f:
-                json.dump(stats, f, indent=2, ensure_ascii=False, default=str)
+                json.dump(stats.to_dict(), f, indent=2, ensure_ascii=False, default=str)
 
             print(f"✅ Query statistics exported to: {filename}")
         except Exception as e:
@@ -1542,12 +1479,21 @@ For more help, visit: https://openweathermap.org/api
     def _export_all_data(self) -> None:
         """Create a complete data backup."""
         try:
-            if self.data_manager.backup_all_data():
-                print("✅ Complete data backup created successfully.")
+            path = self.data_manager.backup()
+        except StorageError as e:
+            print(f"❌ {e}")
+            return
+        print(f"✅ Data backed up to: {path}")
+
+    def print_data_statistics(self) -> None:
+        """Print where the data files are and how big they are."""
+        print(f"Data directory: {self.data_manager.directory}")
+        for info in self.data_manager.file_info():
+            if info.exists and info.modified:
+                size = format_file_size(info.size_bytes)
+                print(f"  {info.name}: {size} (modified {info.modified:%Y-%m-%d %H:%M})")
             else:
-                print("❌ Failed to create data backup.")
-        except Exception as e:
-            print(f"❌ Error creating backup: {e}")
+                print(f"  {info.name}: not created yet")
 
 
 def main():

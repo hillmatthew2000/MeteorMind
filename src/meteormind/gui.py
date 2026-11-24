@@ -12,17 +12,18 @@ Features include:
 
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from .api import APIError, WeatherAPIHandler, describe_error
+from .cache import ResponseCache
 from .config import ConfigError, ConfigManager
 from .history import HistoryManager
 
 # Import our custom modules
 from .models import Location, WeatherData
-from .storage import DataManager
+from .storage import DataStore, StorageError, format_file_size, migrate_legacy_data
 from .units import (
-    UnitPreferences,
     WeatherFormatter,
     create_imperial_preferences,
     create_metric_preferences,
@@ -51,24 +52,15 @@ class WeatherGUI:
         self.root.minsize(600, 400)
 
         # Initialize backend components
-        self.data_manager = DataManager()
-        self.history_manager = HistoryManager(self.data_manager)
+        self.data_manager = DataStore()
+        migrate_legacy_data(Path.cwd() / "data", self.data_manager.directory)
+        self.preferences = self.data_manager.load_preferences()
+        self.history_manager = HistoryManager(self.data_manager, self.preferences.history_limit)
         self.config_manager = ConfigManager()
-
-        # Load user preferences
-        user_prefs = self.data_manager.get_user_preferences()
-        unit_prefs_data = user_prefs.get("units", {})
-
-        if isinstance(unit_prefs_data, str):
-            if unit_prefs_data == "imperial":
-                self.unit_preferences = create_imperial_preferences()
-            else:
-                self.unit_preferences = create_metric_preferences()
-        else:
-            try:
-                self.unit_preferences = UnitPreferences.from_dict(unit_prefs_data)
-            except (KeyError, ValueError):
-                self.unit_preferences = create_metric_preferences()
+        self.unit_preferences = self.preferences.units
+        self.cache = ResponseCache(
+            self.data_manager.cache_file, ttl_seconds=self.preferences.cache_seconds
+        )
 
         self.formatter = WeatherFormatter(self.unit_preferences)
 
@@ -88,7 +80,7 @@ class WeatherGUI:
     def _init_api_handler(self) -> bool:
         """Initialize the API handler with error handling."""
         try:
-            self.api_handler = WeatherAPIHandler()
+            self.api_handler = WeatherAPIHandler(cache=self.cache)
             return True
         except APIError as e:
             messagebox.showerror(
@@ -440,8 +432,6 @@ class WeatherGUI:
             try:
                 weather_data, location = self.api_handler.get_current_weather_by_name(city, country)
 
-                # Cache and track
-                self.history_manager.cache_weather_data(location, weather_data)
                 self.history_manager.add_query(location, weather_data, "current")
 
                 # Update GUI in main thread
@@ -540,8 +530,6 @@ class WeatherGUI:
             try:
                 forecast_data, location = self.api_handler.get_forecast_by_name(city, country, days)
 
-                # Cache and track
-                self.history_manager.cache_forecast_data(location, forecast_data)
                 self.history_manager.add_query(location, None, "forecast")
 
                 # Update GUI in main thread
@@ -774,7 +762,7 @@ class WeatherGUI:
         history_text = f"📊 RECENT QUERIES ({len(recent_queries)} shown)\n"
         history_text += "=" * 60 + "\n\n"
 
-        for i, query in enumerate(reversed(recent_queries), 1):
+        for i, query in enumerate(recent_queries, 1):
             time_str = query.query_time.strftime("%Y-%m-%d %H:%M:%S")
             location_str = f"{query.location.city}, {query.location.country}"
             history_text += f"{i:2d}. {time_str} | {location_str:25s} | {query.query_type}\n"
@@ -791,15 +779,14 @@ class WeatherGUI:
         history_text += "\n" + "=" * 60 + "\n"
         history_text += "📈 STATISTICS\n"
         history_text += "=" * 60 + "\n"
-        history_text += f"Total Queries: {stats['total_queries']}\n"
+        history_text += f"Total Queries: {stats.total_queries}\n"
 
-        if stats["most_queried_locations"]:
+        if stats.top_locations:
             history_text += "\nMost Queried Locations:\n"
-            for location, count in stats["most_queried_locations"][:5]:
+            for location, count in stats.top_locations[:5]:
                 history_text += f"  • {location}: {count} queries\n"
 
-        cache_stats = stats["cache_stats"]
-        history_text += f"\nCache: {cache_stats['valid_entries']} valid entries\n"
+        history_text += f"\nCache: {len(self.cache)} valid entries\n"
 
         self.history_info.insert(1.0, history_text)
 
@@ -963,11 +950,9 @@ class WeatherGUI:
     def clear_history(self):
         """Clear query history with confirmation."""
         if messagebox.askyesno("Confirm Clear", "Clear all query history? This cannot be undone."):
-            if self.history_manager.clear_history():
-                self.update_history_display()
-                messagebox.showinfo("Success", "Query history cleared.")
-            else:
-                messagebox.showerror("Error", "Failed to clear history.")
+            self.history_manager.clear_history()
+            self.update_history_display()
+            messagebox.showinfo("Success", "Query history cleared.")
 
     def export_history(self):
         """Export query history to a file."""
@@ -978,10 +963,12 @@ class WeatherGUI:
         )
 
         if filename:
-            if self.history_manager.export_history(filename):
-                messagebox.showinfo("Success", f"History exported to:\n{filename}")
-            else:
-                messagebox.showerror("Error", "Failed to export history.")
+            try:
+                self.history_manager.export_history(filename)
+            except StorageError as e:
+                messagebox.showerror("Error", str(e))
+                return
+            messagebox.showinfo("Success", f"History exported to:\n{filename}")
 
     def update_unit_preferences(self, event=None):
         """Update unit preferences when combobox selection changes."""
@@ -1006,9 +993,8 @@ class WeatherGUI:
 
     def save_preferences(self):
         """Save current preferences to storage."""
-        user_prefs = self.data_manager.get_user_preferences()
-        user_prefs["units"] = self.unit_preferences.to_dict()
-        self.data_manager.save_user_preferences(user_prefs)
+        self.preferences.units = self.unit_preferences
+        self.data_manager.save_preferences(self.preferences)
 
     def set_metric_units(self):
         """Set metric unit preset."""
@@ -1174,22 +1160,20 @@ Your API key will be saved securely for future use.
     def clear_cache(self):
         """Clear weather cache."""
         if messagebox.askyesno("Confirm Clear", "Clear weather cache?"):
-            if self.history_manager.clear_cache():
-                messagebox.showinfo("Success", "Cache cleared successfully.")
-            else:
-                messagebox.showerror("Error", "Failed to clear cache.")
+            self.cache.clear()
+            messagebox.showinfo("Success", "Cache cleared successfully.")
 
     def backup_data(self):
         """Create a data backup."""
-        if self.data_manager.backup_all_data():
-            messagebox.showinfo("Success", "Data backup created successfully.")
-        else:
-            messagebox.showerror("Error", "Failed to create backup.")
+        try:
+            path = self.data_manager.backup()
+        except StorageError as e:
+            messagebox.showerror("Error", str(e))
+            return
+        messagebox.showinfo("Success", f"Data backed up to:\n{path}")
 
     def show_data_statistics(self):
         """Show data statistics in a dialog."""
-        stats = self.data_manager.get_data_statistics()
-
         dialog = tk.Toplevel(self.root)
         dialog.title("Data Statistics")
         dialog.geometry("400x300")
@@ -1199,25 +1183,17 @@ Your API key will be saved securely for future use.
         stats_text = scrolledtext.ScrolledText(dialog, wrap="word")
         stats_text.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Format statistics
-        from .storage import format_file_size
-
         stats_content = "📊 DATA STATISTICS\n"
         stats_content += "=" * 40 + "\n\n"
-        stats_content += f"Data Directory: {stats['data_directory']}\n"
-        stats_content += f"Total Size: {format_file_size(stats['total_size_bytes'])}\n\n"
-        stats_content += "Files:\n"
-
-        for name, file_info in stats["files"].items():
-            if file_info["exists"]:
-                if "error" in file_info:
-                    stats_content += f"  {name}: ERROR - {file_info['error']}\n"
-                else:
-                    size = format_file_size(file_info["size_bytes"])
-                    modified = file_info["last_modified"][:19].replace("T", " ")
-                    stats_content += f"  {name}: {size} (modified: {modified})\n"
+        stats_content += f"Data Directory: {self.data_manager.directory}\n\n"
+        for info in self.data_manager.file_info():
+            if info.exists and info.modified:
+                size = format_file_size(info.size_bytes)
+                stats_content += (
+                    f"  {info.name}: {size} (modified {info.modified:%Y-%m-%d %H:%M})\n"
+                )
             else:
-                stats_content += f"  {name}: Not found\n"
+                stats_content += f"  {info.name}: not created yet\n"
 
         stats_text.insert(1.0, stats_content)
         stats_text.config(state="disabled")
