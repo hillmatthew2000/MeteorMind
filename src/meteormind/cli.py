@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TextIO
 
 from . import __version__
-from .api import MAX_FORECAST_DAYS, APIError
+from .api import MAX_FORECAST_DAYS, APIError, LocationNotFoundError
 from .config import ConfigError
 from .console import (
     configure_stream,
@@ -27,6 +27,7 @@ from .console import (
     favorites_table,
     history_table,
 )
+from .models import Location
 from .reporting import REPORT_FORMATS, ReportError, render_report, write_report
 from .service import REPORT_KINDS, InputError, WeatherService
 from .storage import StorageError
@@ -45,6 +46,9 @@ class App:
     service: WeatherService
     out: TextIO = field(default_factory=lambda: sys.stdout)
     err: TextIO = field(default_factory=lambda: sys.stderr)
+    inp: TextIO = field(default_factory=lambda: sys.stdin)
+    # Whether questions can be asked; prompts go to ``err`` so piped output stays clean.
+    interactive: bool = False
 
     def print(self, text: str = "") -> None:
         print(text, file=self.out)
@@ -64,6 +68,50 @@ def _place(words: Sequence[str]) -> str:
     return " ".join(words).strip()
 
 
+def resolve_place(app: App, words: Sequence[str], pick: int | None = None) -> Location:
+    """The place the user meant when a name matches several.
+
+    ``pick`` chooses by position. Otherwise an interactive session asks, and
+    a script gets the best match with the alternatives listed on stderr.
+    """
+    query = _place(words)
+    matches = app.service.search(query)
+    if not matches:
+        raise LocationNotFoundError(f"No place called '{query}' was found.")
+    numbered = [f"{n}. {loc.display_name}" for n, loc in enumerate(matches, 1)]
+    if pick is not None:
+        if not 1 <= pick <= len(matches):
+            raise InputError(
+                f"'{query}' matches {len(matches)} place(s); --pick {pick} is not one.", numbered
+            )
+        return matches[pick - 1]
+    if len(matches) == 1:
+        return matches[0]
+    if app.interactive:
+        return _ask_which(app, query, matches)
+    app.warn(
+        f"Note: '{query}' matches {len(matches)} places; using the first. Choose with --pick N:"
+    )
+    for line in numbered:
+        app.warn(f"  {line}")
+    return matches[0]
+
+
+def _ask_which(app: App, query: str, matches: Sequence[Location]) -> Location:
+    app.warn(f"Several places match '{query}':")
+    for n, location in enumerate(matches, 1):
+        app.warn(f"  {n}. {location.display_name}")
+    while True:
+        print(f"Which one? [1-{len(matches)}, Enter for 1]: ", end="", file=app.err, flush=True)
+        answer = app.inp.readline()
+        if not answer:
+            raise InputError("No place was chosen.")
+        answer = answer.strip() or "1"
+        if answer.isdigit() and 1 <= int(answer) <= len(matches):
+            return matches[int(answer) - 1]
+        app.warn(f"Enter a number from 1 to {len(matches)}.")
+
+
 def _dump_json(app: App, data: object) -> None:
     app.print(json.dumps(data, indent=2, ensure_ascii=False))
 
@@ -72,7 +120,7 @@ def _dump_json(app: App, data: object) -> None:
 
 
 def cmd_current(app: App, args: argparse.Namespace) -> int:
-    location = app.service.locate(_place(args.place))
+    location = resolve_place(app, args.place, args.pick)
     weather = app.service.current_weather(location)
     if args.json:
         _dump_json(app, {"location": location.to_dict(), "weather": weather.to_dict()})
@@ -82,7 +130,7 @@ def cmd_current(app: App, args: argparse.Namespace) -> int:
 
 
 def cmd_forecast(app: App, args: argparse.Namespace) -> int:
-    location = app.service.locate(_place(args.place))
+    location = resolve_place(app, args.place, args.pick)
     forecast = app.service.forecast(location, args.days)
     if args.json:
         _dump_json(
@@ -109,7 +157,7 @@ def cmd_favorites_list(app: App, args: argparse.Namespace) -> int:
 
 
 def cmd_favorites_add(app: App, args: argparse.Namespace) -> int:
-    location = app.service.locate(_place(args.place))
+    location = resolve_place(app, args.place, args.pick)
     if app.service.add_favorite(location):
         app.print(f"Added {location.display_name} to favorites.")
     else:
@@ -269,6 +317,16 @@ def _add_days_option(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_pick_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-p",
+        "--pick",
+        type=int,
+        metavar="N",
+        help="when the name matches several places, use the Nth (default: ask, or the first)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="meteormind",
@@ -295,11 +353,13 @@ def build_parser() -> argparse.ArgumentParser:
     current = command("current", "show the current weather for a place", cmd_current)
     current.add_argument("place", nargs="+", help="for example: London, or New York, US")
     current.add_argument("--json", action="store_true", help="print JSON (metric units)")
+    _add_pick_option(current)
 
     forecast = command("forecast", "show the daily forecast for a place", cmd_forecast)
     forecast.add_argument("place", nargs="+")
     _add_days_option(forecast)
     forecast.add_argument("--json", action="store_true", help="print JSON (metric units)")
+    _add_pick_option(forecast)
 
     favorites = command("favorites", "list or change your favorite places", cmd_favorites_list)
     favorites.add_argument("--json", action="store_true")
@@ -307,6 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
     fav_commands.add_parser("list", help="list favorites (the default)")
     fav_add = fav_commands.add_parser("add", help="add a place")
     fav_add.add_argument("place", nargs="+")
+    _add_pick_option(fav_add)
     fav_add.set_defaults(handler=cmd_favorites_add)
     fav_remove = fav_commands.add_parser("remove", help="remove a favorite")
     fav_remove.add_argument("place", nargs="+")
@@ -385,7 +446,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .menu import Menu
 
             return Menu(service).run()
-        return int(args.handler(App(service), args))
+        interactive = sys.stdin.isatty() and sys.stderr.isatty()
+        return int(args.handler(App(service, interactive=interactive), args))
     except KeyboardInterrupt:
         print(file=sys.stderr)
         return EXIT_INTERRUPTED

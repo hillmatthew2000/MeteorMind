@@ -7,9 +7,10 @@ import pytest
 from meteormind import cli
 from meteormind.config import ConfigManager
 from meteormind.console import configure_stream, display_width, format_pairs, format_table
-from meteormind.service import WeatherService
+from meteormind.service import InputError, WeatherService
 
 from .conftest import API_KEY
+from .test_service import FlakyProvider
 
 
 def run(capsys: pytest.CaptureFixture[str], *args: str) -> tuple[int, str, str]:
@@ -86,6 +87,45 @@ class TestWeatherCommands:
                 cli.main(args)
             assert info.value.code == cli.EXIT_USAGE
         capsys.readouterr()
+
+
+class TestAmbiguousPlaces:
+    @pytest.fixture(autouse=True)
+    def ambiguous_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("meteormind.service.DemoWeatherClient", FlakyProvider)
+
+    def test_scripts_get_the_first_match_and_a_note(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code, out, err = run(capsys, "--demo", "current", "Springfield")
+        assert code == 0 and out.startswith("Springfield, Illinois, US\n")
+        assert "matches 2 places" in err and "2. Springfield, Missouri, US" in err
+
+    def test_pick(self, capsys: pytest.CaptureFixture[str]) -> None:
+        code, out, err = run(capsys, "--demo", "forecast", "Springfield", "--pick", "2", "-d", "1")
+        assert code == 0 and "Springfield, Missouri, US" in out and not err
+        code, out, _ = run(capsys, "--demo", "favorites", "add", "Springfield", "-p", "2")
+        assert out == "Added Springfield, Missouri, US to favorites.\n"
+        code, _, err = run(capsys, "--demo", "current", "Springfield", "--pick", "3")
+        assert code == cli.EXIT_USAGE and "1. Springfield, Illinois, US" in err
+
+    def test_interactive_sessions_ask(self) -> None:
+        service = WeatherService.create(demo=True)
+        out, err = io.StringIO(), io.StringIO()
+        app = cli.App(service, out, err, io.StringIO("9\nwhat\n2\n"), interactive=True)
+        assert cli.resolve_place(app, ["Springfield"]).state == "Missouri"
+        assert err.getvalue().count("Which one?") == 3
+        assert "Enter a number from 1 to 2." in err.getvalue() and not out.getvalue()
+
+        app.inp = io.StringIO("\n")
+        assert cli.resolve_place(app, ["Springfield"]).state == "Illinois"
+        app.inp = io.StringIO("")
+        with pytest.raises(InputError):
+            cli.resolve_place(app, ["Springfield"])
+
+    def test_single_matches_never_ask(self) -> None:
+        app = cli.App(WeatherService.create(demo=True), inp=io.StringIO(), interactive=True)
+        assert cli.resolve_place(app, ["Cairo"]).country == "EG"
 
 
 class TestFavorites:
@@ -230,7 +270,7 @@ class TestEntryPoints:
         def interrupt(*args: object) -> None:
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(WeatherService, "locate", interrupt)
+        monkeypatch.setattr(WeatherService, "search", interrupt)
         assert run(capsys, "--demo", "current", "London")[0] == cli.EXIT_INTERRUPTED
 
 
