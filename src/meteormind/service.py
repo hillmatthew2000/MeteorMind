@@ -188,8 +188,12 @@ class WeatherService:
         return _unique_places(self.provider.search_locations(city, country, limit))
 
     def locate(self, query: str) -> Location:
-        """The best match for ``query``; raises :class:`LocationNotFoundError`."""
-        matches = self.search(query, limit=1)
+        """The best match for ``query``; raises :class:`LocationNotFoundError`.
+
+        Asks for the same results as :meth:`search`, so the cached geocoding
+        response is shared with it.
+        """
+        matches = self.search(query)
         if not matches:
             raise LocationNotFoundError(f"No place called '{query.strip()}' was found.")
         return matches[0]

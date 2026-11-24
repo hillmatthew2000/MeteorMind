@@ -17,7 +17,7 @@ from meteormind.service import InputError, WeatherService, parse_place
 from meteormind.storage import DataStore, StorageError
 from meteormind.units import WindSpeedUnit, create_imperial_preferences
 
-from .conftest import API_KEY
+from .conftest import API_KEY, GEO_PATH, FakeTransport
 
 
 class FlakyProvider(DemoWeatherClient):
@@ -80,6 +80,14 @@ class TestLookups:
         assert service.locate("london, gb").country == "GB"
         with pytest.raises(LocationNotFoundError):
             service.locate("London, FR")
+
+    def test_search_and_locate_share_one_geocoding_request(
+        self, tmp_path: Path, client: WeatherAPIHandler, transport: FakeTransport
+    ) -> None:
+        service = WeatherService(DataStore(tmp_path), client)
+        service.search("London")
+        assert service.locate("London").city == "London"
+        assert len(transport.calls(GEO_PATH)) == 1
 
     def test_lookups_are_recorded(self, service: WeatherService) -> None:
         london = service.locate("London")
