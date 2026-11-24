@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -21,6 +23,7 @@ from meteormind.service import WeatherService
 from meteormind.storage import DataStore, StorageError
 from meteormind.units import create_imperial_preferences
 
+from .conftest import API_KEY
 from .test_service import FlakyProvider
 
 
@@ -356,3 +359,89 @@ def test_log_file(tmp_path: Path) -> None:
             root_logger.removeHandler(handler)
             handler.close()
     assert len(added) == 1 and "disk on fire" in target.read_text(encoding="utf-8")
+
+
+class Dialogs:
+    """Stands in for tkinter.messagebox: records messages, answers questions."""
+
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+        self.answer = True
+
+    def showerror(self, _title: str, message: str, **_kwargs: object) -> None:
+        self.errors.append(message)
+
+    def askyesno(self, *_args: object, **_kwargs: object) -> bool:
+        return self.answer
+
+
+@pytest.fixture
+def dialogs(monkeypatch: pytest.MonkeyPatch) -> Dialogs:
+    from tkinter import messagebox
+
+    fake = Dialogs()
+    monkeypatch.setattr(messagebox, "showerror", fake.showerror)
+    monkeypatch.setattr(messagebox, "askyesno", fake.askyesno)
+    return fake
+
+
+def test_api_key_settings(app: Any, dialogs: Dialogs) -> None:
+    app.key_entry.insert(0, "not-a-key")
+    app.save_key()
+    assert dialogs.errors and "32 hexadecimal" in dialogs.errors[-1]
+    assert "No key is set" in app.key_status.cget("text")
+
+    app.key_entry.delete(0, "end")
+    app.key_entry.insert(0, API_KEY)
+    app.save_key()
+    assert app.service.config.get_api_key() == API_KEY
+    assert app.key_entry.get() == ""
+    assert "A key is set" in app.key_status.cget("text")
+
+    app.remove_key()
+    assert app.service.config.get_api_key() is None
+    assert app.status.get() == "Removed the saved key"
+    app.remove_key()
+    assert app.status.get() == "No key was saved"
+
+
+def test_backup_and_delete_all(app: Any, dialogs: Dialogs, monkeypatch: pytest.MonkeyPatch) -> None:
+    app.backup()
+    backup = Path(app.status.get().removeprefix("Backed up to "))
+    assert backup.is_dir() and any(backup.iterdir())
+
+    dialogs.answer = False
+    app.delete_all_data()
+    pump(app)
+    assert len(app.service.favorites) == 5 and app.service.history.queries
+
+    def broken() -> None:
+        raise StorageError("Could not delete history.json")
+
+    dialogs.answer = True
+    clear_all_data = app.service.clear_all_data
+    monkeypatch.setattr(app.service, "clear_all_data", broken)
+    app.delete_all_data()
+    pump(app)
+    assert dialogs.errors == ["Could not delete history.json"]
+    assert len(app.service.favorites) == 5
+
+    monkeypatch.setattr(app.service, "clear_all_data", clear_all_data)
+    app.delete_all_data()
+    pump(app)
+    assert app.status.get() == "All data deleted"
+    assert len(app.service.favorites) == 0 and not app.service.history.queries
+    assert app.favorites_tree.get_children() == ()
+    assert app.weather_panel.current_state is not app.weather_panel.content
+
+
+def test_data_folder_that_cannot_be_opened(
+    app: Any, dialogs: Dialogs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*_args: object) -> None:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "startfile", fail, raising=False)
+    monkeypatch.setattr(subprocess, "Popen", fail)
+    app.open_data_folder()
+    assert dialogs.errors == ["Could not open the data folder."]

@@ -997,11 +997,20 @@ class MeteorMindApp:
 
     def open_data_folder(self) -> None:
         folder = self.service.store.directory
-        folder.mkdir(parents=True, exist_ok=True)
-        if sys.platform == "win32":
-            os.startfile(folder)
-        else:
-            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(folder)
+            else:
+                opener = "open" if sys.platform == "darwin" else "xdg-open"
+                subprocess.Popen([opener, str(folder)])
+        except OSError as error:
+            messagebox.showerror(
+                "MeteorMind",
+                "Could not open the data folder.",
+                detail=f"{folder}\n{error.strerror or error}",
+                parent=self.root,
+            )
 
     def backup(self) -> None:
         try:
@@ -1024,19 +1033,32 @@ class MeteorMindApp:
             icon="warning",
         ):
             return
-        try:
-            self.service.clear_all_data()
-        except StorageError as error:
+        # Drop the results of lookups still in flight, and delete on the worker
+        # so it happens after them rather than racing their history writes.
+        self._request += 1
+
+        def refresh(outcome: str) -> None:
+            # Also after a failure: part of the data may be gone.
+            self.shown = None
+            self.report = None
+            self._set_report_text("")
+            self._load_settings_controls()
+            self.apply_theme()
+            self.refresh_favorites()
+            self.refresh_history()
+            self.show_start_state()
+            self.status.set(outcome)
+
+        def failed(error: BaseException) -> None:
             self.show_error_dialog(error)
-        self.shown = None
-        self.report = None
-        self._set_report_text("")
-        self._load_settings_controls()
-        self.apply_theme()
-        self.refresh_favorites()
-        self.refresh_history()
-        self.show_start_state()
-        self.status.set("All data deleted")
+            refresh("Some data could not be deleted")
+
+        self.run(
+            self.service.clear_all_data,
+            lambda _result: refresh("All data deleted"),
+            "Deleting your data…",
+            failed,
+        )
 
     # Lifecycle -----------------------------------------------------------------
 
