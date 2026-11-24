@@ -183,6 +183,8 @@ class Theme:
 
         s.configure("TFrame", background=p.background)
         s.configure("Card.TFrame", background=p.surface, bordercolor=p.border, relief="solid")
+        # Frames laid out inside a card: the card colour without a border of their own.
+        s.configure("CardBody.TFrame", background=p.surface, relief="flat", borderwidth=0)
         s.configure("Toolbar.TFrame", background=p.surface)
         s.configure("Banner.TFrame", background=p.warning_bg)
         s.configure("Status.TFrame", background=p.surface_alt)

@@ -179,6 +179,10 @@ def test_starts_with_the_first_favorite(app: Any) -> None:
     assert app.favorites_tree.selection() == ("0",)
     assert "°C" in panel.temperature.cget("text")
     assert len([c for c in panel.cards if c.winfo_manager()]) == 5
+    assert [c.day.cget("text") for c in panel.cards[:2]] == ["Today", "Tomorrow"]
+    third = app.service.forecast(next(iter(app.service.favorites)))[2].date
+    assert panel.cards[2].day.cget("text") == f"{third:%A}"
+    assert panel.cards[2].date.cget("text") == f"{third.day} {third:%B}"
     assert app.root.title() == "MeteorMind — demo data"
 
 

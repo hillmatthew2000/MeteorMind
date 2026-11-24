@@ -144,9 +144,10 @@ class ForecastCard(ttk.Frame):
         for label in (self.description, self.precipitation):
             label.configure(wraplength=max(event.width - 24, 60))
 
-    def show(self, day: ForecastData, fmt: WeatherFormatter) -> None:
-        self.day.configure(text=f"{day.date:%A}")
-        self.date.configure(text=f"{day.date:%d %B}")
+    def show(self, day: ForecastData, fmt: WeatherFormatter, name: str | None = None) -> None:
+        """Show ``day``, headed by ``name`` (e.g. "Today") or else the weekday."""
+        self.day.configure(text=name or f"{day.date:%A}")
+        self.date.configure(text=f"{day.date.day} {day.date:%B}")
         self.symbol.configure(text=weather_symbol(day.icon))
         self.high.configure(text=f"High {fmt.format_temperature(day.temperature_max)}")
         self.low.configure(text=f"Low {fmt.format_temperature(day.temperature_min)}")
@@ -220,7 +221,7 @@ class WeatherPanel(ttk.Frame):
         self.summary.grid(row=2, column=2, columnspan=2, sticky="w", padx=(24, 0), pady=(8, 0))
         ttk.Separator(card).grid(row=3, column=0, columnspan=4, sticky="ew", pady=14)
 
-        stats = ttk.Frame(card, style="Card.TFrame", borderwidth=0)
+        stats = ttk.Frame(card, style="CardBody.TFrame")
         stats.grid(row=4, column=0, columnspan=4, sticky="ew")
         self.stats: dict[str, ttk.Label] = {}
         names = ("Feels like", "Humidity", "Wind", "Pressure", "Visibility", "Today")
@@ -296,8 +297,9 @@ class WeatherPanel(ttk.Frame):
         is_favorite: bool,
     ) -> None:
         self.place_label.configure(text=location.display_name)
+        observed = weather.timestamp
         self.subtitle.configure(
-            text=f"Observed {weather.timestamp:%A %d %B, %H:%M}  ·  "
+            text=f"Observed {observed:%A} {observed.day} {observed:%B}, {observed:%H:%M}  ·  "
             f"{location.latitude:.2f}, {location.longitude:.2f}"
         )
         self.symbol.configure(text=weather_symbol(weather.icon))
@@ -325,14 +327,16 @@ class WeatherPanel(ttk.Frame):
         for name, label in self.stats.items():
             label.configure(text=values[name])
 
-        self.forecast_title.configure(text=f"Next {len(forecast)} days" if forecast else "")
+        self.forecast_title.configure(text=f"{len(forecast)}-day forecast" if forecast else "")
         while len(self.cards) < len(forecast):
             self.cards.append(ForecastCard(self.forecast_row))
         for column, card in enumerate(self.cards):
             if column < len(forecast):
                 self.forecast_row.columnconfigure(column, weight=1, uniform="day")
                 card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 10, 0))
-                card.show(forecast[column], fmt)
+                # Forecasts start on the current day at the place itself.
+                heading = ("Today", "Tomorrow")[column] if column < 2 else None
+                card.show(forecast[column], fmt, heading)
             else:
                 self.forecast_row.columnconfigure(column, weight=0, uniform="")
                 card.grid_remove()

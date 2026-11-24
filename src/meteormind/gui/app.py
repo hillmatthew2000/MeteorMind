@@ -164,7 +164,7 @@ class MeteorMindApp:
         self.favorites_tree.grid(row=1, column=0, sticky="nsew", pady=8)
         self.favorites_tree.bind("<<TreeviewSelect>>", lambda _e: self.open_selected_favorite())
         self.favorites_tree.bind("<Delete>", lambda _e: self.remove_selected_favorite())
-        buttons = ttk.Frame(card, style="Card.TFrame")
+        buttons = ttk.Frame(card, style="CardBody.TFrame")
         buttons.grid(row=2, column=0, sticky="ew")
         buttons.columnconfigure((0, 1), weight=1)
         ttk.Button(buttons, text="Move to top", command=self.move_selected_favorite).grid(
@@ -311,7 +311,7 @@ class MeteorMindApp:
             box.grid(row=row, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=3)
             box.bind("<<ComboboxSelected>>", lambda _e: self.apply_units_from_controls())
             self.unit_vars[name] = var
-        presets = ttk.Frame(units, style="Card.TFrame")
+        presets = ttk.Frame(units, style="CardBody.TFrame")
         presets.grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Button(
             presets, text="Metric", command=lambda: self.set_units(create_metric_preferences())
@@ -362,7 +362,7 @@ class MeteorMindApp:
         ttk.Button(key, text="Save", style="Accent.TButton", command=self.save_key).grid(
             row=2, column=2, sticky="e", padx=(6, 0)
         )
-        key_buttons = ttk.Frame(key, style="Card.TFrame")
+        key_buttons = ttk.Frame(key, style="CardBody.TFrame")
         key_buttons.grid(row=3, column=0, columnspan=3, sticky="ew")
         key_buttons.columnconfigure((0, 1), weight=1, uniform="key")
         ttk.Button(key_buttons, text="Test", command=self.test_key).grid(
@@ -382,7 +382,7 @@ class MeteorMindApp:
         self.data_folder = tk.StringVar(tab, value=str(self.service.store.directory))
         folder = ttk.Entry(data, textvariable=self.data_folder, state="readonly")
         folder.grid(row=1, column=0, columnspan=3, sticky="ew")
-        data_buttons = ttk.Frame(data, style="Card.TFrame")
+        data_buttons = ttk.Frame(data, style="CardBody.TFrame")
         data_buttons.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         data_buttons.columnconfigure((0, 1), weight=1, uniform="data")
         for index, (text, command) in enumerate(
