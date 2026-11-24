@@ -10,14 +10,18 @@ Features include:
 - Query history viewing
 """
 
+import argparse
+import sys
 import threading
 import tkinter as tk
+from collections.abc import Sequence
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from .api import APIError, WeatherAPIHandler, describe_error
 from .cache import ResponseCache
 from .config import ConfigError, ConfigManager
+from .demo import DemoWeatherClient
 from .history import HistoryManager
 
 # Import our custom modules
@@ -44,8 +48,9 @@ class WeatherGUI:
     - History viewing
     """
 
-    def __init__(self, root):
+    def __init__(self, root, demo: bool = False):
         """Initialize the GUI application."""
+        self.demo = demo
         self.root = root
         self.root.title("🌤️ Weather Application")
         self.root.geometry("800x600")
@@ -79,6 +84,9 @@ class WeatherGUI:
 
     def _init_api_handler(self) -> bool:
         """Initialize the API handler with error handling."""
+        if self.demo:
+            self.api_handler = DemoWeatherClient()
+            return True
         try:
             self.api_handler = WeatherAPIHandler(cache=self.cache)
             return True
@@ -1221,18 +1229,16 @@ Your API key will be saved securely for future use.
         self.add_favorite_btn.config(state="disabled")
 
 
-def main():
+def main(argv: Sequence[str] | None = None) -> int:
     """Main entry point for the GUI application."""
+    parser = argparse.ArgumentParser(prog="meteormind-gui")
+    parser.add_argument("--demo", action="store_true", help="use built-in sample data")
+    args = parser.parse_args(argv)
     root = tk.Tk()
-    WeatherGUI(root)
-
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        print("Application interrupted.")
-    except Exception as e:
-        messagebox.showerror("Fatal Error", f"An unexpected error occurred:\n{e}")
+    WeatherGUI(root, demo=args.demo)
+    root.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -8,6 +8,7 @@ including tabular reports, summary views, and export functionality.
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .models import ForecastData, Location, WeatherData, WeatherQuery
@@ -101,6 +102,35 @@ class WeatherReport:
             "footer": self.footer,
             "generated_at": datetime.now().isoformat(),
         }
+
+
+REPORT_FORMATS = ("txt", "csv", "json")
+
+
+class ReportError(Exception):
+    """Raised when a report cannot be saved; ``str(error)`` is user-facing."""
+
+
+def render_report(report: WeatherReport, fmt: str = "txt") -> str:
+    """Render a report as plain text, CSV or JSON."""
+    if fmt == "csv":
+        return report.to_csv()
+    if fmt == "json":
+        return json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    return report.to_table_string()
+
+
+def write_report(report: WeatherReport, path: Path | str, fmt: str | None = None) -> Path:
+    """Save a report; the format defaults to the file extension (else text)."""
+    target = Path(path)
+    if fmt is None:
+        suffix = target.suffix.lower().lstrip(".")
+        fmt = suffix if suffix in REPORT_FORMATS else "txt"
+    try:
+        target.write_text(render_report(report, fmt) + "\n", encoding="utf-8", newline="")
+    except OSError as exc:
+        raise ReportError(f"Could not write {target}: {exc.strerror or exc}") from exc
+    return target
 
 
 class WeatherReportGenerator:
